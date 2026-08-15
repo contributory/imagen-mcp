@@ -1,0 +1,20 @@
+{
+  "tasks": {
+    "serve": "deno run --allow-net --allow-env --allow-import scripts/serve-local.ts",
+    "test": "deno run --allow-net --allow-env --allow-import scripts/test-local.ts",
+    "test:mock": "deno run --allow-net --allow-env --allow-import scripts/test-mock-api.ts",
+    "check": "deno check mcp-image-server.ts scripts/"
+  },
+  "lint": {
+    "include": ["mcp-image-server.ts", "scripts/"],
+    "rules": {
+      "exclude": [
+        "no-import-prefix",
+        "no-unversioned-import"
+      ]
+    }
+  },
+  "fmt": {
+    "include": ["mcp-image-server.ts", "scripts/"]
+  }
+}
