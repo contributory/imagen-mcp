@@ -1,5 +1,107 @@
 You are an advanced assistant specialized in generating Val Town code.
 
+## Project: imagen-mcp
+
+An MCP (Model Context Protocol) server that generates images through any
+OpenAI-compatible image-generation API (OpenAI DALL·E / gpt-image-1, Groq,
+Together, OpenRouter, local vLLM/LiteLLM, ...). Written in **Deno**, deployed as
+a **Val Town HTTP val** (single file). Clients connect via the **Streamable
+HTTP** transport (Claude Desktop, Cursor, Copilot, any MCP client).
+
+### Stack & entry point
+
+- `mcp-image-server.ts` — the ONLY file that matters for deployment. Paste it
+  into a Val Town HTTP val. The **default export is the HTTP handler**:
+  `export default function handler(req: Request): Response | Promise<Response>`
+  Val Town calls the default export directly — a `{ fetch }` object default
+  export is NOT supported there (that pattern is only used by
+  `scripts/serve-local.ts` for local testing).
+- `export const mcpHandler` — named export of `createMcpHandler(...)`, used
+  only by local scripts/tests.
+- Imports: `npm:@modelcontextprotocol/server` (v2 SDK) and `npm:zod@4`. Inline
+  `npm:` imports are **mandatory** for Val Town single-file portability — do
+  not refactor them out; `deno.json` excludes the `no-import-prefix` and
+  `no-unversioned-import` lint rules for this reason.
+- Constants: `SERVER_NAME = "imagen-mcp"`, `SERVER_VERSION = "2.2.0"`,
+  `DEFAULT_BASE_URL = "https://api.openai.com/v1"`,
+  `DEFAULT_MODEL = "dall-e-3"` (last-resort fallback only).
+
+### Config: NO environment variables
+
+The server is **multi-tenant** — every request carries its own credentials,
+read per-request inside the `createMcpHandler` factory via `ctx.requestInfo`
+(the original `Request`). There are no env vars to configure (the only one read
+is the Val Town-injected `valtown` secret, used purely to detect the platform).
+
+| Setting | Header | Query param |
+|---|---|---|
+| API key (required) | `X-OpenAI-Api-Key` or `Authorization: Bearer <key>` | `api_key` |
+| Base URL (optional) | `X-OpenAI-Base-Url` | `base_url` |
+
+- `extractConfig(req)` → `ServerConfig { apiKey, baseUrl }` (trailing slashes
+  stripped from `baseUrl`).
+- `headerOrParam(headers, headerName, params, paramName, fallback)` reads a
+  header first, then falls back to a URL query param.
+- Missing API key → `generate_image`/`list_models` return a helpful error
+  telling the client to pass the key via header, Bearer, or `api_key` param.
+
+### Model resolution (generate_image)
+
+The model is NOT configured by the client. Resolution order:
+1. Explicit `model` tool argument (optional override).
+2. Remembered last-used model for that base URL (in-memory `Map` + Val Town
+   blob `meta/last_models.json`, keyed by `baseUrl`).
+3. First call: `pickModel(baseUrl, apiKey)` → `GET {base_url}/models`, prefers
+   an image-capable id (`IMAGE_MODEL_HINTS`: gpt-image, dall-e, flux, sdxl,
+   stable-diffusion, imagen, ...), else the first id, else `DEFAULT_MODEL`
+   with a warning.
+The resolved model is stored via `rememberModel(baseUrl, model)`; blob writes
+only happen when the value actually changes.
+
+### Tools
+
+- `generate_image` — calls `POST {base_url}/images/generations`. Args: `prompt`
+  (required), `model?`, `size?` (enum), `n?` (1–10), `quality?`, `style?`,
+  `response_format?` (`url`|`b64_json`), `save_to_blob?` (bool), `extra?`
+  (passthrough record merged into the body). Returns markdown (with images /
+  data URIs) + `structuredContent { model, created, images[] }`.
+- `list_models` — calls `GET {base_url}/models`; returns `{ models: string[] }`.
+- `list_images` — lists images persisted to Val Town blob storage
+  (prefix `images/<model>/...`) via `blob.list`. Args: `model?`, `limit?`.
+  Only works on Val Town (detected via `Deno.env.get("valtown")`); elsewhere
+  returns an explanatory message. Returns `{ total, images[] }`.
+
+### Blob storage (Val Town only)
+
+Dynamically imports `https://esm.town/v/std/blob/main.ts` inside try/catch (the
+module doesn't exist off Val Town). `saveImageToBlob(b64, model)` persists
+`images/<model>/<ts>-<uuid>.png`; `list_images` reads them with
+`blob.list(prefix)`. No public URLs — images are served via this val or read
+with `blob.get()`.
+
+### Local development (not Val Town)
+
+- `deno task serve` → `scripts/serve-local.ts` (wraps the default export with
+  `Deno.serve` on `127.0.0.1:8789`; Deno.serve logs a harmless legacy-abort
+  warning). The `{ fetch }`-style object export is used ONLY in this wrapper.
+- `deno task test` → `scripts/test-local.ts` (JSON-RPC smoke: initialize →
+  tools/list → tools/call without a key → helpful error; asserts the three
+  tools are listed).
+- `deno task test:mock` → `scripts/test-mock-api.ts` (E2E against a local mock
+  OpenAI API on 8788; verifies headers/query-param/Bearer config, model
+  auto-select + remember (only one `/models` query), `list_models`,
+  `list_images`, missing-key error).
+- `deno task check` / `deno lint` — keep clean before committing.
+
+### Gotchas
+
+- The Deno binary here lives at `$(npm prefix -g)/bin/deno` (not on default
+  PATH) — prefix commands with `export PATH="$PATH:$(npm prefix -g)/bin"`.
+- Do not use `Deno.env.set` on Val Town (no-op), and do not rely on module-scope
+  mutable state for correctness across requests — the per-request factory makes
+  it safe, but persist anything that must survive cold starts to blob.
+- Never bake API keys into the code — credentials always come per-request.
+
 ## Core Guidelines
 
 - Ask clarifying questions when requirements are ambiguous
