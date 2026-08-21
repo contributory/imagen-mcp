@@ -1,27 +1,27 @@
 # 🎨 imagen-mcp
 
-MCP (Model Context Protocol) server tạo ảnh qua **API tương thích OpenAI** (OpenAI-compatible), viết bằng **Deno** và có thể **deploy lên Val Town** chỉ trong vài giây.
+MCP (Model Context Protocol) server for image generation via **OpenAI-compatible API**, written in **Deno** and can be **deployed to Val Town** in just seconds.
 
-Kết nối với Claude Desktop, Cursor, GitHub Copilot, hay bất kỳ MCP client nào bằng transport **Streamable HTTP**.
+Connect to Claude Desktop, Cursor, GitHub Copilot, or any MCP client using **Streamable HTTP** transport.
 
-> 🚫 **Không cần cấu hình biến môi trường nào cả.** API key và base URL được MCP client gửi kèm theo từng request qua **HTTP header** hoặc **URL query param**.
+> 🚫 **No environment variables required.** API key and base URL are sent by the MCP client with each request via **HTTP header** or **URL query param**.
 
 ---
 
-## 🔑 Truyền cấu hình (header / query param)
+## 🔑 Passing Configuration (header / query param)
 
-Mỗi request tới MCP server đều có thể mang cấu hình riêng của nó:
+Each request to the MCP server can carry its own configuration:
 
-| Thông tin | Header | Query param | Bắt buộc |
+| Information | Header | Query param | Required |
 |---|---|---|---|
 | API key | `X-OpenAI-Api-Key` | `api_key` | ✅ |
-| Base URL | `X-OpenAI-Base-Url` | `base_url` | ❌ (mặc định `https://api.openai.com/v1`) |
+| Base URL | `X-OpenAI-Base-Url` | `base_url` | ❌ (defaults to `https://api.openai.com/v1`) |
 
-> 🤖 **Model không cần truyền** — server **ghi nhớ model lần cuối** dùng cho từng base URL (bộ nhớ + blob storage trên Val Town). Lần đầu tự gọi `GET {base_url}/models` để chọn model (ưu tiên model tạo ảnh), các lần sau tái sử dụng model đã nhớ. Vẫn có thể ghi đè bằng tham số `model` của `generate_image`.
+> 🤖 **Model does not need to be passed** — the server **remembers the last-used model** for each base URL (memory + blob storage on Val Town). On first use, it calls `GET {base_url}/models` to select a model (preferring image-generation models), and reuses the remembered model on subsequent calls. You can still override it using the `model` parameter of `generate_image`.
 
-API key cũng có thể truyền qua header chuẩn: `Authorization: Bearer <api_key>`.
+API key can also be passed via the standard header: `Authorization: Bearer <api_key>`.
 
-**Ví dụ với curl (qua header):**
+**Example with curl (via header):**
 
 ```bash
 curl -X POST https://<username>-<valname>.web.val.run/ \
@@ -32,7 +32,7 @@ curl -X POST https://<username>-<valname>.web.val.run/ \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-**Hoặc qua query param:**
+**Or via query param:**
 
 ```bash
 curl -X POST "https://<username>-<valname>.web.val.run/?api_key=sk-...&base_url=https%3A%2F%2Fapi.openai.com%2Fv1" \
@@ -42,59 +42,59 @@ curl -X POST "https://<username>-<valname>.web.val.run/?api_key=sk-...&base_url=
 
 ---
 
-## ✨ Tính năng
+## ✨ Features
 
-- **`generate_image`** — gọi `POST {base_url}/images/generations` (DALL·E 3, gpt-image-1, Groq, Together, OpenRouter, vLLM/LiteLLM local, ...)
-  - Model **tự chọn & ghi nhớ** — lần đầu chọn từ `GET /models` (ưu tiên model tạo ảnh), sau đó nhớ lại model lần cuối cho từng base URL; không cần truyền `model`, vẫn có thể ghi đè
-  - Hỗ trợ `prompt`, `size`, `n`, `quality`, `style`, `response_format`
-  - Tham số `extra` để truyền thêm bất kỳ field nào cho provider
-  - `save_to_blob: true` để lưu ảnh vào Val Town blob storage
-  - Trả về Markdown kèm ảnh + `structuredContent` (url / base64) cho agent dùng lập trình
-- **`list_models`** — liệt kê model khả dụng từ `GET /models`
-- **`list_images`** — liệt kê những ảnh đã tạo và lưu vào blob storage (`images/<model>/...`) trên Val Town
-- Không cần env vars — cấu hình theo từng request (multi-tenant, mỗi người dùng key của mình)
-- Chạy serverless an toàn: mỗi request tạo một `McpServer` mới (per-request factory)
+- **`generate_image`** — calls `POST {base_url}/images/generations` (DALL·E 3, gpt-image-1, Groq, Together, OpenRouter, vLLM/LiteLLM local, ...)
+  - Model **auto-selected & remembered** — first call selects from `GET /models` (preferring image-generation models), then remembers the last-used model for each base URL; no need to pass `model`, but you can still override it
+  - Supports `prompt`, `size`, `n`, `quality`, `style`, `response_format`
+  - `extra` parameter to pass any additional fields to the provider
+  - `save_to_blob: true` to save images to Val Town blob storage
+  - Returns Markdown with images + `structuredContent` (url / base64) for programmatic agent use
+- **`list_models`** — lists available models from `GET /models`
+- **`list_images`** — lists images previously generated and saved to blob storage (`images/<model>/...`) on Val Town
+- No env vars required — configuration per request (multi-tenant, each user uses their own key)
+- Runs safely serverless: each request creates a new `McpServer` instance (per-request factory)
 
 ---
 
-## 📁 Cấu trúc project
+## 📁 Project structure
 
 ```
 imagen-mcp/
-├── mcp-image-server.ts      # File val chính — paste thẳng vào Val Town
+├── mcp-image-server.ts      # Main val file — paste directly into Val Town
 ├── deno.json                # Tasks: serve / test / test:mock / check
 ├── README.md
 ├── .gitignore
 └── scripts/
-    ├── serve-local.ts       # Chạy server HTTP local (test với MCP client thật)
+    ├── serve-local.ts       # Run HTTP server locally (test with real MCP client)
     ├── test-local.ts        # Smoke test: initialize → tools/list → tools/call
     └── test-mock-api.ts     # E2E test: header / query param / Authorization
 ```
 
 ---
 
-## 🚀 Deploy lên Val Town
+## 🚀 Deploy to Val Town
 
-### Cách 1 — Trình soạn thảo web (đơn giản nhất)
+### Method 1 — Web editor (simplest)
 
-1. Vào [val.town](https://val.town) → **New val** → đặt tên (ví dụ `imagen-mcp`).
-2. Dán toàn bộ nội dung `mcp-image-server.ts` vào editor.
-3. Click **`+ Add trigger`** → chọn **HTTP**.
-4. **Save** — val được deploy ngay lập tức. Endpoint của bạn:
+1. Go to [val.town](https://val.town) → **New val** → name it (e.g., `imagen-mcp`).
+2. Paste the entire content of `mcp-image-server.ts` into the editor.
+3. Click **`+ Add trigger`** → select **HTTP**.
+4. **Save** — the val is deployed immediately. Your endpoint:
    `https://<username>-<valname>.web.val.run`
 
-> Không cần thêm bất kỳ environment variable nào — API key/base URL được gửi kèm từng request.
+> No environment variables needed — API key/base URL are sent with each request.
 
-### Cách 2 — vt CLI
+### Method 2 — vt CLI
 
 ```bash
 npx valtown val create --http <username>/imagen-mcp
-# sau đó dán nội dung file mcp-image-server.ts và deploy
+# then paste the content of mcp-image-server.ts and deploy
 ```
 
 ---
 
-## 🔌 Kết nối MCP client
+## 🔌 Connecting MCP clients
 
 ### Claude Desktop
 
@@ -117,36 +117,36 @@ npx valtown val create --http <username>/imagen-mcp
 
 ### Cursor / GitHub Copilot
 
-Thêm **MCP server** mới với:
+Add a new **MCP server** with:
 
 - **Transport:** `Streamable HTTP`
 - **URL:** `https://<username>-<valname>.web.val.run`
 - **Headers:**
   - `X-OpenAI-Api-Key`: `<your-api-key>`
-  - `X-OpenAI-Base-Url`: `https://api.openai.com/v1` (tùy chọn)
+  - `X-OpenAI-Base-Url`: `https://api.openai.com/v1` (optional)
 
-> Mỗi người dùng dùng API key của chính mình — server dùng chung được (multi-tenant), không có key nào nằm sẵn trên server.
+> Each user uses their own API key — the server is shared (multi-tenant), no keys stored on the server.
 
 ---
 
-## 🖥️ Chạy local (trước khi deploy)
+## 🖥️ Running locally (before deployment)
 
-Yêu cầu: [Deno](https://deno.land) ≥ 2.x.
+Requirements: [Deno](https://deno.land) ≥ 2.x.
 
 ```bash
-# 1. Smoke test (không cần API key)
+# 1. Smoke test (no API key needed)
 deno task test
 
-# 2. E2E test với mock API (header / query param / Authorization)
+# 2. E2E test with mock API (header / query param / Authorization)
 deno task test:mock
 
-# 3. Chạy server HTTP local
+# 3. Run HTTP server locally
 deno task serve
-# → MCP server tại http://127.0.0.1:8789
-# Gửi kèm header X-OpenAI-Api-Key khi gọi tools
+# → MCP server at http://127.0.0.1:8789
+# Send X-OpenAI-Api-Key header when calling tools
 ```
 
-Hoặc chạy trực tiếp:
+Or run directly:
 
 ```bash
 deno run --allow-net --allow-env --allow-import scripts/serve-local.ts
@@ -154,14 +154,14 @@ deno run --allow-net --allow-env --allow-import scripts/serve-local.ts
 
 ---
 
-## 🔧 Ví dụ sử dụng tool
+## 🔧 Tool usage examples
 
 ```text
-Vẽ một chú corgi phi hành gia trên mặt trăng, phong cách anime, nền sao lấp lánh.
+Draw a corgi astronaut on the moon, anime style, with a sparkling starry background.
 ```
-→ gọi `generate_image({ prompt: "...", size: "1024x1024", quality: "hd" })`
+→ calls `generate_image({ prompt: "...", size: "1024x1024", quality: "hd" })`
 
-Trả về:
+Returns:
 
 ```markdown
 Generated 1 image(s) with model **dall-e-3**.
@@ -171,32 +171,32 @@ Generated 1 image(s) with model **dall-e-3**.
 
 ---
 
-## 🌐 Provider tương thích (OpenAI-compatible)
+## 🌐 Compatible providers (OpenAI-compatible)
 
-| Provider | `X-OpenAI-Base-Url` | Ghi chú |
+| Provider | `X-OpenAI-Base-Url` | Notes |
 |---|---|---|
 | OpenAI | `https://api.openai.com/v1` | DALL·E 3, gpt-image-1 |
 | Groq | `https://api.groq.com/openai/v1` | |
 | Together AI | `https://api.together.xyz/v1` | |
 | OpenRouter | `https://openrouter.ai/api/v1` | |
-| vLLM / LiteLLM | `http://localhost:8000/v1` | chạy local |
-| Ollama | `http://localhost:11434/v1` | (tùy model) |
+| vLLM / LiteLLM | `http://localhost:8000/v1` | running locally |
+| Ollama | `http://localhost:11434/v1` | (depends on model) |
 
-> 💡 Một số provider/model chỉ trả `b64_json` (không hỗ trợ `url`). Khi đó hãy truyền `response_format: "b64_json"` — server sẽ trả ảnh dạng data URI; kèm `save_to_blob: true` để lưu vào blob storage của Val Town.
-
----
-
-## ⚠️ Lưu ý
-
-- **Val Town = serverless**: không dựa vào state ở module scope giữa các request. `createMcpHandler` dùng per-request factory nên an toàn.
-- **Ảnh lưu trong blob storage** của Val Town (khi truyền `save_to_blob: true`) chỉ xem được qua blob admin trong sidebar, tool `list_images`, hoặc đọc bằng `blob.get()` — không phải URL public.
-- **API key qua query param** có thể bị lộ trong log/lịch sử; ưu tiên dùng **header**.
-- **Thời gian tạo ảnh** có thể lâu (10–60s) tùy provider; một số MCP client cần tăng timeout HTTP.
+> 💡 Some providers/models only return `b64_json` (no `url` support). In that case, pass `response_format: "b64_json"` — the server returns the image as a data URI; add `save_to_blob: true` to save to Val Town's blob storage.
 
 ---
 
-## 🧰 Công nghệ
+## ⚠️ Notes
+
+- **Val Town = serverless**: do not rely on module-scope state between requests. `createMcpHandler` uses a per-request factory, so it's safe.
+- **Images stored in blob storage** on Val Town (when passing `save_to_blob: true`) can only be viewed via blob admin in the sidebar, the `list_images` tool, or by reading with `blob.get()` — they are not public URLs.
+- **API key via query param** may leak in logs/history; prefer using **headers**.
+- **Image generation time** can be slow (10–60s) depending on the provider; some MCP clients may need increased HTTP timeout.
+
+---
+
+## 🧰 Technologies
 
 - [Model Context Protocol TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) — `@modelcontextprotocol/server` (v2)
-- [zod v4](https://zod.dev) — schema cho tool
-- [Val Town](https://val.town) — nền tảng serverless chạy Deno
+- [zod v4](https://zod.dev) — schema for tool
+- [Val Town](https://val.town) — Deno serverless platform
