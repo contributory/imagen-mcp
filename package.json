@@ -1,0 +1,19 @@
+{
+  "name": "imagen-mcp-node",
+  "version": "2.2.0",
+  "type": "module",
+  "description": "MCP image generation server — Node.js (no Val Town / Deno)",
+  "main": "main.ts",
+  "scripts": {
+    "start": "node main.ts",
+    "start:stdio": "node main.ts --stdio",
+    "dev": "node --watch main.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0"
+  }
+}
