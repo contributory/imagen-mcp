@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server for image generation via **OpenAI-compatible
 
 Connect to Claude Desktop, Cursor, GitHub Copilot, or any MCP client using **Streamable HTTP** transport.
 
-> 🚫 **No environment variables required.** API key and base URL are sent by the MCP client with each request via **HTTP header** or **URL query param**.
+> 🔑 **No environment variables are required for the upstream image API.** API key and base URL are sent by the MCP client with each request via **HTTP header** or **URL query param**. Supabase Storage environment variables are used only as a fallback when a provider returns base64 instead of a URL.
 
 ---
 
@@ -17,7 +17,7 @@ Each request to the MCP server can carry its own configuration:
 | API key | `X-OpenAI-Api-Key` | `apiKey` | ✅ |
 | Base URL | `X-OpenAI-Base-Url` | `baseUrl` | ❌ (defaults to `https://api.openai.com/v1`) |
 
-> 🤖 **Model does not need to be passed** — when `model` is omitted, the server calls `GET {baseUrl}/models` for that request and selects an image-generation model. The server is stateless and does not persist models, images, credentials, or request data.
+> 🤖 **Model does not need to be passed** — when `model` is omitted, the server calls `GET {baseUrl}/models` for that request and selects an image-generation model. Model selection and credentials are not persisted. Images are stored only when a provider returns base64 and a URL must be produced.
 
 API key can also be passed via the standard header: `Authorization: Bearer <apiKey>`.
 
@@ -46,11 +46,12 @@ curl -X POST "https://<username>-<valname>.web.val.run/?apiKey=sk-...&baseUrl=ht
 
 - **`generate_image`** — uses the official OpenAI JavaScript/TypeScript SDK (`client.images.generate`) against the configured `baseUrl` (DALL·E 3, GPT Image models, and OpenAI-compatible providers)
   - Model **auto-selected per request** from `GET /models` (preferring image-generation models) when `model` is omitted; nothing is persisted
-  - Supports `prompt`, `size`, `n`, `quality`, `style`, `response_format`
+  - Supports `prompt`, `size`, `n`, `quality`, `style`
   - `extra` parameter to pass any additional fields to the provider
-  - Returns Markdown with images + `structuredContent` (url / base64) for programmatic agent use
-- **`list_models`** — lists available models from `GET /models`
-- No env vars required — configuration per request (multi-tenant, each user uses their own key)
+  - Returns plain-text image URLs + URL-only `structuredContent`; provider URLs are passed through directly, while base64-only results are uploaded to Supabase Storage and returned as Storage URLs
+- **`list_image_models`** — lists only known image-generation models from `GET /models` using a curated regex
+- **`list_models`** — lists all models from `GET /models`; optional `keywords` filters model ids case-insensitively using whitespace/comma-separated terms
+- Upstream API credentials stay per-request. Supabase Storage fallback uses the deployment project's `SUPABASE_URL` and Supabase secret key (`SUPABASE_SECRET_KEYS` on current Edge Functions; legacy `SUPABASE_SERVICE_ROLE_KEY` is also supported)
 - Runs safely serverless: each request creates a new `McpServer` instance (per-request factory)
 
 ---
@@ -126,6 +127,14 @@ Configure these environment variables in the CircleCI project settings:
 - `SUPABASE_PROJECT_REF` — the target Supabase project ref.
 
 The deploy command keeps the function public with `--no-verify-jwt`, matching `supabase/config.toml`.
+
+### Supabase Storage fallback
+
+When an image provider returns `b64_json` instead of a URL, `generate_image` uploads the decoded image to Supabase Storage and returns the resulting URL. The default bucket is `imagen-mcp-generated`; it is created as a public bucket on first use. Set `SUPABASE_STORAGE_BUCKET` to override the bucket name.
+
+On hosted Supabase Edge Functions, `SUPABASE_URL` and `SUPABASE_SECRET_KEYS` are provided by the project automatically; the legacy `SUPABASE_SERVICE_ROLE_KEY` is also supported. Outside Supabase (for example Node.js or Val Town), set `SUPABASE_URL` plus either `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_SECRET_KEY`, or `SUPABASE_SECRET_KEYS` if you want base64-only providers to use the Storage fallback.
+
+If an existing configured bucket is private, the server uploads there and returns a signed URL instead of forcing the bucket public.
 
 ---
 
@@ -217,7 +226,7 @@ Generated 1 image(s) with model **dall-e-3**.
 | vLLM / LiteLLM | `http://localhost:8000/v1` | running locally |
 | Ollama | `http://localhost:11434/v1` | (depends on model) |
 
-> 💡 Some providers/models only return `b64_json` (no `url` support). In that case, pass `response_format: "b64_json"` — the server returns the image as a data URI.
+> 💡 The server is URL-only and stateless. If a provider/model returns only base64 image data and no URL, `generate_image` returns an error instead of exposing or storing the image bytes.
 
 ---
 

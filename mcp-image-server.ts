@@ -98,29 +98,156 @@ interface GeneratedImage {
 }
 
 
+
+const DEFAULT_STORAGE_BUCKET = "imagen-mcp-generated";
+
+interface SupabaseStorageConfig {
+  url: string;
+  serviceKey: string;
+  bucket: string;
+}
+
+function getSupabaseServiceKey(): string {
+  const plain = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SECRET_KEY") ?? "").trim();
+  if (plain) return plain;
+  const json = Deno.env.get("SUPABASE_SECRET_KEYS");
+  if (!json) return "";
+  try {
+    const keys = JSON.parse(json) as Record<string, unknown>;
+    return typeof keys.default === "string" ? keys.default.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+function getSupabaseStorageConfig(): SupabaseStorageConfig | null {
+  const url = (Deno.env.get("SUPABASE_URL") ?? "").trim().replace(/\/+$/, "");
+  const serviceKey = getSupabaseServiceKey();
+  const bucket = (Deno.env.get("SUPABASE_STORAGE_BUCKET") ?? DEFAULT_STORAGE_BUCKET).trim();
+  return url && serviceKey && bucket ? { url, serviceKey, bucket } : null;
+}
+
+function storageHeaders(serviceKey: string, contentType?: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${serviceKey}`,
+    apikey: serviceKey,
+    ...(contentType ? { "Content-Type": contentType } : {}),
+  };
+}
+
+function storageObjectPath(bucket: string, objectPath: string): { encodedBucket: string; encodedPath: string } {
+  return {
+    encodedBucket: encodeURIComponent(bucket),
+    encodedPath: objectPath.split("/").map(encodeURIComponent).join("/"),
+  };
+}
+
+async function ensureStorageBucket(config: SupabaseStorageConfig): Promise<boolean> {
+  const encodedBucket = encodeURIComponent(config.bucket);
+  const getBucket = () => fetch(`${config.url}/storage/v1/bucket/${encodedBucket}`, {
+    headers: storageHeaders(config.serviceKey),
+  });
+
+  let res = await getBucket();
+  if (res.ok) {
+    const info = await res.json().catch(() => ({})) as { public?: boolean };
+    return Boolean(info.public);
+  }
+  if (res.status !== 404) {
+    throw new Error(`Supabase Storage bucket check failed (HTTP ${res.status}): ${await res.text()}`);
+  }
+
+  const create = await fetch(`${config.url}/storage/v1/bucket`, {
+    method: "POST",
+    headers: storageHeaders(config.serviceKey, "application/json"),
+    body: JSON.stringify({ id: config.bucket, name: config.bucket, public: true }),
+  });
+  if (create.ok) return true;
+  if (create.status !== 409) {
+    throw new Error(`Supabase Storage bucket creation failed (HTTP ${create.status}): ${await create.text()}`);
+  }
+
+  res = await getBucket();
+  if (!res.ok) {
+    throw new Error(`Supabase Storage bucket check failed after create race (HTTP ${res.status}): ${await res.text()}`);
+  }
+  const info = await res.json().catch(() => ({})) as { public?: boolean };
+  return Boolean(info.public);
+}
+
+function decodeBase64Image(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function imageOutputFormat(args: { extra?: Record<string, unknown> }): { extension: string; contentType: string } {
+  const format = typeof args.extra?.output_format === "string" ? args.extra.output_format.toLowerCase() : "png";
+  if (format === "jpeg" || format === "jpg") return { extension: "jpg", contentType: "image/jpeg" };
+  if (format === "webp") return { extension: "webp", contentType: "image/webp" };
+  return { extension: "png", contentType: "image/png" };
+}
+
+async function uploadBase64ImageToSupabase(
+  b64: string,
+  model: string,
+  args: { extra?: Record<string, unknown> },
+): Promise<string> {
+  const config = getSupabaseStorageConfig();
+  if (!config) {
+    throw new Error(
+      "Supabase Storage fallback is not configured. SUPABASE_URL and a Supabase secret/service-role key are required when the provider only returns base64 image data.",
+    );
+  }
+
+  const isPublic = await ensureStorageBucket(config);
+  const { extension, contentType } = imageOutputFormat(args);
+  const safeModel = model.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 100) || "model";
+  const objectPath = `${safeModel}/${Date.now()}-${crypto.randomUUID()}.${extension}`;
+  const { encodedBucket, encodedPath } = storageObjectPath(config.bucket, objectPath);
+
+  const bytes = decodeBase64Image(b64);
+  const uploadBody = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const upload = await fetch(`${config.url}/storage/v1/object/${encodedBucket}/${encodedPath}`, {
+    method: "POST",
+    headers: {
+      ...storageHeaders(config.serviceKey, contentType),
+      "x-upsert": "false",
+    },
+    body: uploadBody,
+  });
+  if (!upload.ok) {
+    throw new Error(`Supabase Storage upload failed (HTTP ${upload.status}): ${await upload.text()}`);
+  }
+
+  if (isPublic) {
+    return `${config.url}/storage/v1/object/public/${encodedBucket}/${encodedPath}`;
+  }
+
+  const sign = await fetch(`${config.url}/storage/v1/object/sign/${encodedBucket}/${encodedPath}`, {
+    method: "POST",
+    headers: storageHeaders(config.serviceKey, "application/json"),
+    body: JSON.stringify({ expiresIn: 604800 }),
+  });
+  if (!sign.ok) {
+    throw new Error(`Supabase Storage signed URL creation failed (HTTP ${sign.status}): ${await sign.text()}`);
+  }
+  const signed = await sign.json() as { signedURL?: string };
+  if (!signed.signedURL) throw new Error("Supabase Storage did not return a signed URL.");
+  return new URL(signed.signedURL, `${config.url}/`).toString();
+}
+
 // ---------------------------------------------------------------------------
 // Model auto-selection via GET {baseUrl}/models
 // ---------------------------------------------------------------------------
 
-/** Substrings that hint a model id is image-capable. */
-const IMAGE_MODEL_HINTS = [
-  "gpt-image",
-  "dall-e",
-  "dall",
-  "flux",
-  "sdxl",
-  "stable-diffusion",
-  "stable",
-  "imagen",
-  "sana",
-  "playground",
-  "image",
-];
+/** Curated known image-generation families; delimiter-aware to avoid broad false positives. */
+const IMAGE_MODEL_REGEX = /(?:^|[\/:._-])(?:gpt[-._]?image|chatgpt[-._]?image|dall[-._]?e|imagen|gemini[-._][a-z0-9._-]*[-._]image|flux(?:[-._]?\d+(?:\.\d+)*)?|stable[-._]?(?:diffusion|image)|sdxl|sd3(?:[-._]?\d+(?:\.\d+)*)?|qwen[-._]?image|wan(?:[-._]?\d+(?:\.\d+)*)?[-._]?(?:image|t2i|i2i)|z[-._]?image|ideogram|recraft|seedream|hidream|midjourney|firefly[-._]?image|sana|playground|photon|auraflow|pixart|kolors|cogview|hunyuan[-._]?image)(?=$|[\/:._-])/i;
 
-/** Best-effort guess whether a model id is meant for image generation. */
+/** Best-effort classification of an image-generation model id. */
 function looksImageCapable(id: string): boolean {
-  const lower = id.toLowerCase();
-  return IMAGE_MODEL_HINTS.some((hint) => lower.includes(hint));
+  return IMAGE_MODEL_REGEX.test(id);
 }
 
 interface ModelPick {
@@ -129,9 +256,8 @@ interface ModelPick {
 }
 
 /**
- * Pick a model by querying GET {baseUrl}/models. Prefers the first
- * image-capable id, otherwise the first model returned. Falls back to
- * DEFAULT_MODEL (with a warning) when /models cannot be reached.
+ * Pick a model by querying GET {baseUrl}/models and filtering through the
+ * curated image-model regex. Falls back to DEFAULT_MODEL if none match.
  */
 async function pickModel(baseUrl: string, apiKey: string): Promise<ModelPick> {
   const endpoint = `${baseUrl}/models`;
@@ -150,7 +276,11 @@ async function pickModel(baseUrl: string, apiKey: string): Promise<ModelPick> {
     if (ids.length === 0) {
       return { model: DEFAULT_MODEL, warning: `No models returned by /models; using fallback model "${DEFAULT_MODEL}".` };
     }
-    return { model: ids.find(looksImageCapable) ?? ids[0] };
+    const imageModels = ids.filter(looksImageCapable);
+    if (imageModels.length === 0) {
+      return { model: DEFAULT_MODEL, warning: `No known image-generation model matched /models; using fallback model "${DEFAULT_MODEL}".` };
+    }
+    return { model: imageModels[0] };
   } catch (err) {
     return {
       model: DEFAULT_MODEL,
@@ -172,7 +302,6 @@ async function generateImages(
     n?: number;
     quality?: string;
     style?: string;
-    response_format?: "url" | "b64_json";
     extra?: Record<string, unknown>;
   },
 ): Promise<{ content: { type: "text"; text: string }[]; structuredContent?: unknown; isError?: boolean }> {
@@ -189,8 +318,9 @@ async function generateImages(
     model,
     prompt: args.prompt,
     n: args.n ?? 1,
-    response_format: args.response_format ?? "url",
   };
+  // Request URL output where OpenAI-compatible providers support it. Official GPT Image models always return base64.
+  if (!/^(?:gpt[-._]?image|chatgpt[-._]?image)/i.test(model)) body.response_format = "url";
   if (args.size && args.size !== "auto") body.size = args.size;
   if (args.quality) body.quality = args.quality;
   if (args.style) body.style = args.style;
@@ -224,12 +354,27 @@ async function generateImages(
     const entry: Record<string, unknown> = { index: i };
     if (typeof img.url === "string" && img.url) {
       entry.url = img.url;
-      markdownLines.push(`![Generated image ${i + 1}](${img.url})`);
+      markdownLines.push(`Image ${i + 1}: ${img.url}`);
     } else if (typeof img.b64_json === "string" && img.b64_json) {
-      entry.b64_json = img.b64_json;
-      markdownLines.push(`![Generated image ${i + 1}](data:image/png;base64,${img.b64_json})`);
+      try {
+        const url = await uploadBase64ImageToSupabase(img.b64_json, model, args);
+        entry.url = url;
+        markdownLines.push(`Image ${i + 1}: ${url}`);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text", text: `Image storage fallback failed: ${detail}` }],
+          isError: true,
+        };
+      }
     } else {
-      entry.raw = img;
+      return {
+        content: [{
+          type: "text",
+          text: `Image API returned neither a URL nor base64 image data for model **${model}**.`,
+        }],
+        isError: true,
+      };
     }
     structuredImages.push(entry);
   }
@@ -252,7 +397,7 @@ function buildServer(config: ServerConfig): McpServer {
     "generate_image",
     {
       description:
-        "Generate one or more images through an OpenAI-compatible image generation API (DALL·E 3, gpt-image-1, ...). Returns Markdown containing the images plus structured metadata (urls / base64). The API key and base URL come from the request headers (X-OpenAI-Api-Key, X-OpenAI-Base-Url) or query params (apiKey, baseUrl).",
+        "Generate one or more images through an OpenAI-compatible image generation API. Returns plain-text image URLs plus structured URL metadata. Base64 image content is never exposed. The API key and base URL come from request headers or apiKey/baseUrl query params.",
       inputSchema: z.object({
         prompt: z.string().describe("Detailed text description of the image(s) to generate."),
         model: z
@@ -266,10 +411,6 @@ function buildServer(config: ServerConfig): McpServer {
         n: z.number().int().min(1).max(10).optional().describe("How many images to generate. Defaults to 1."),
         quality: z.enum(["standard", "hd"]).optional().describe("Quality, e.g. for DALL·E 3."),
         style: z.enum(["vivid", "natural"]).optional().describe("Style, e.g. for DALL·E 3."),
-        response_format: z
-          .enum(["url", "b64_json"])
-          .optional()
-          .describe("Return 'url' (default) for a shareable link, or 'b64_json' for inline base64 data."),
         extra: z
           .record(z.string(), z.unknown())
           .optional()
@@ -291,9 +432,9 @@ function buildServer(config: ServerConfig): McpServer {
   );
 
   server.registerTool(
-    "list_models",
+    "list_image_models",
     {
-      description: "List the models available from the configured OpenAI-compatible API (GET /models).",
+      description: "List known image-generation models from the configured OpenAI-compatible API (GET /models), filtered by a curated regex of image-model families.",
       inputSchema: z.object({}),
     },
     async () => {
@@ -317,11 +458,74 @@ function buildServer(config: ServerConfig): McpServer {
         };
       }
       const data = (await res.json()) as { data?: { id?: string }[] };
-      const models = (data.data ?? []).map((m) => m.id).filter(Boolean);
+      const models = (data.data ?? [])
+        .map((m) => m.id)
+        .filter((id): id is string => typeof id === "string" && looksImageCapable(id));
       return {
         content: [{
           type: "text",
-          text: models.length ? `Available models (${models.length}):\n${models.join("\n")}` : "No models returned by the API.",
+          text: models.length
+            ? `Available image models (${models.length}):\n${models.join("\n")}`
+            : "No known image-generation models matched the configured API's model list.",
+        }],
+        structuredContent: { models },
+      };
+    },
+  );
+
+  server.registerTool(
+    "list_models",
+    {
+      description: "List all models from the configured OpenAI-compatible API (GET /models). Optionally filter model names by a keyword string; whitespace- or comma-separated terms are matched case-insensitively and all terms must be present.",
+      inputSchema: z.object({
+        keywords: z
+          .string()
+          .optional()
+          .describe("Optional keywords used to filter model ids, e.g. 'gpt 5' or 'qwen,coder'."),
+      }),
+    },
+    async (args) => {
+      if (!config.apiKey) {
+        return {
+          content: [{
+            type: "text",
+            text: "No API key provided. Pass it via the `X-OpenAI-Api-Key` header, `Authorization: Bearer <key>`, or the `apiKey` query parameter.",
+          }],
+          isError: true,
+        };
+      }
+      const endpoint = `${config.baseUrl}/models`;
+      const res = await fetch(endpoint, {
+        headers: { Authorization: `Bearer ${config.apiKey}` },
+      });
+      if (!res.ok) {
+        return {
+          content: [{ type: "text", text: `Models API error (HTTP ${res.status}): ${await res.text()}` }],
+          isError: true,
+        };
+      }
+      const data = (await res.json()) as { data?: { id?: string }[] };
+      const allModels = (data.data ?? [])
+        .map((m) => m.id)
+        .filter((id): id is string => typeof id === "string");
+      const terms = (args.keywords ?? "")
+        .toLowerCase()
+        .split(/[\s,]+/)
+        .map((term) => term.trim())
+        .filter(Boolean);
+      const models = terms.length
+        ? allModels.filter((id) => {
+          const lower = id.toLowerCase();
+          return terms.every((term) => lower.includes(term));
+        })
+        : allModels;
+      const suffix = terms.length ? ` matching "${args.keywords}"` : "";
+      return {
+        content: [{
+          type: "text",
+          text: models.length
+            ? `Available models${suffix} (${models.length}):\n${models.join("\n")}`
+            : `No models matched${suffix}.`,
         }],
         structuredContent: { models },
       };
