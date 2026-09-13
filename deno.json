@@ -3,12 +3,15 @@
     "serve": "deno run --allow-net --allow-env --allow-import scripts/serve-local.ts",
     "test": "deno run --allow-net --allow-env --allow-import scripts/test-local.ts",
     "test:mock": "deno run --allow-net --allow-env --allow-import scripts/test-mock-api.ts",
-    "check": "deno check mcp-image-server.ts scripts/ supabase/functions/imagen-mcp/index.ts"
+    "check": "deno check mcp-image-server.ts supabase-queue.ts scripts/ supabase/functions/imagen-mcp/index.ts supabase/functions/imagen-mcp-worker/index.ts",
+    "test:queue": "deno run --allow-net --allow-env --allow-import scripts/test-queue.ts"
   },
   "lint": {
     "include": [
       "mcp-image-server.ts",
-      "scripts/"
+      "supabase-queue.ts",
+      "scripts/",
+      "supabase/functions/imagen-mcp-worker/"
     ],
     "rules": {
       "exclude": [
@@ -20,7 +23,9 @@
   "fmt": {
     "include": [
       "mcp-image-server.ts",
-      "scripts/"
+      "supabase-queue.ts",
+      "scripts/",
+      "supabase/functions/"
     ]
   }
 }

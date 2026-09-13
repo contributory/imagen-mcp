@@ -1,3 +1,3 @@
-import handler from "../../../mcp-image-server.ts";
+import { supabaseMcpHandler } from "../../../mcp-image-server.ts";
 
-Deno.serve((req) => handler(req));
+Deno.serve((req) => supabaseMcpHandler.fetch(req));

@@ -42,27 +42,33 @@ is the Val Town-injected `valtown` secret, used purely to detect the platform).
   stripped from `baseUrl`).
 - `headerOrParam(headers, headerName, params, paramName, fallback)` reads a
   header first, then falls back to a URL query param.
-- Missing API key → `generate_image`/`list_image_models`/`list_models` return a helpful error
+- Missing API key → `generate_image`/`list_models` return a helpful error
   telling the client to pass the key via header, Bearer, or `apiKey` param.
 
 ### Model resolution (generate_image)
 
-The server is stateless. Resolution order:
+Model resolution itself is stateless. Resolution order:
 1. Explicit `model` tool argument (optional override).
 2. Otherwise `pickModel(baseUrl, apiKey)` calls `GET {baseUrl}/models` for that
    request, filtering candidates through `IMAGE_MODEL_REGEX`,
    dall-e, flux, sdxl, stable-diffusion, imagen, ...), else the first id, else
    `DEFAULT_MODEL` with a warning.
-No model selection, credential, or request data is persisted. Base64-only generated images are persisted to Supabase Storage only to obtain a URL.
+The standalone generation path does not remember model selection. On Supabase, PGMQ temporarily persists the upstream API key, base URL, prompt, and arguments until the worker reaches a terminal state and deletes the queue message. `image_jobs` stores no upstream API key or prompt. Base64-only generated images are persisted to Supabase Storage to obtain a URL.
 
 ### Tools
 
 - `generate_image` — calls `POST {baseUrl}/images/generations` through the
   official OpenAI SDK. Args: `prompt` (required), `model?`, `size?` (enum),
-  `n?` (1–10), `quality?`, `style?`, `extra?` (passthrough record merged into the body). Returns markdown (with
-  images / data URIs) + `structuredContent { model, created, images[] }`.
-- `list_image_models` — calls `GET {baseUrl}/models`, filters known image-generation families with a curated regex, and returns `{ models: string[] }`.
+  `n?` (1–10), `quality?`, `style?`, `extra?` (passthrough record merged into the body). The synchronous path returns URL-only results; the Supabase wrapper queues the same args and returns `job_id`.
 - `list_models` — calls `GET {baseUrl}/models` and returns all model ids. Optional `keywords` is split on whitespace/commas and all terms must match the model id case-insensitively.
+
+### Supabase async queue
+
+- The Supabase MCP wrapper uses `supabaseMcpHandler`: `generate_image` enqueues into PGMQ and returns `job_id`; `get_image_job` polls results.
+- Queue/database helpers live in `supabase-queue.ts`; the worker entrypoint is `supabase/functions/imagen-mcp-worker/index.ts`.
+- Migration `supabase/migrations/20260913090000_image_generation_queue.sql` creates `image_jobs`, the PGMQ queue, and service-role-only RPCs.
+- Queue payloads temporarily contain the upstream API key and prompt; messages are deleted after terminal completion/failure. `image_jobs` does not persist those secrets/content.
+- CI needs `SUPABASE_DB_PASSWORD` in addition to access token/project ref so migrations are applied before function deployment.
 
 ### Supabase Storage fallback
 
@@ -77,12 +83,11 @@ No model selection, credential, or request data is persisted. Base64-only genera
 - `deno task serve` → `scripts/serve-local.ts` (wraps the default export with
   `Deno.serve` on `127.0.0.1:8789`; Deno.serve logs a harmless legacy-abort
   warning). The `{ fetch }`-style object export is used ONLY in this wrapper.
-- `deno task test` → `scripts/test-local.ts` (JSON-RPC smoke: initialize →
-  tools/list → tools/call without a key → helpful error; asserts the three
-  tools are listed).
+- `deno task test` → `scripts/test-local.ts` (standalone JSON-RPC smoke; asserts `generate_image` + `list_models`).
+- `deno task test:queue` → `scripts/test-queue.ts` (Supabase async MCP smoke; asserts `generate_image` + `get_image_job` + `list_models`, enqueue, worker kick, and polling).
 - `deno task test:mock` → `scripts/test-mock-api.ts` (E2E against a local mock
   OpenAI API on 8788; verifies headers/query-param/Bearer config, model
-  auto-select per request, `list_image_models`, and keyword-filtered `list_models`,
+  auto-select per request and keyword-filtered `list_models`,
   missing-key error).
 - `deno task check` / `deno lint` — keep clean before committing.
 

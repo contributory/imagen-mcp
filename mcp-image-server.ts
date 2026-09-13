@@ -8,9 +8,10 @@
  *
  * Runs on Deno and is designed to be deployed as a Val Town HTTP val.
  *
- * NO ENVIRONMENT VARIABLES REQUIRED — the OpenAI-compatible API base URL and
- * API key are supplied per request by the MCP client, via HTTP headers or URL
- * query parameters:
+ * UPSTREAM API CREDENTIALS ARE PER REQUEST — the OpenAI-compatible API base URL
+ * and API key are supplied by the MCP client via HTTP headers or URL query
+ * parameters. Supabase deployments additionally use platform-provided env vars
+ * for Queue/Storage administration:
  *
  *   Headers:
  *     X-OpenAI-Api-Key: <api key>                  (required)
@@ -52,7 +53,7 @@ const DEFAULT_MODEL = "dall-e-3";
 // Per-request configuration (headers / query params)
 // ---------------------------------------------------------------------------
 
-interface ServerConfig {
+export interface ServerConfig {
   apiKey: string;
   baseUrl: string;
 }
@@ -114,7 +115,14 @@ function getSupabaseServiceKey(): string {
   if (!json) return "";
   try {
     const keys = JSON.parse(json) as Record<string, unknown>;
-    return typeof keys.default === "string" ? keys.default.trim() : "";
+    for (const name of ["service_role", "serviceRole", "secret", "default"]) {
+      const value = keys[name];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    for (const value of Object.values(keys)) {
+      if (typeof value === "string" && value.startsWith("sb_secret_") && value.trim()) return value.trim();
+    }
+    return "";
   } catch {
     return "";
   }
@@ -125,6 +133,96 @@ function getSupabaseStorageConfig(): SupabaseStorageConfig | null {
   const serviceKey = getSupabaseServiceKey();
   const bucket = (Deno.env.get("SUPABASE_STORAGE_BUCKET") ?? DEFAULT_STORAGE_BUCKET).trim();
   return url && serviceKey && bucket ? { url, serviceKey, bucket } : null;
+}
+
+interface SupabaseAdminConfig {
+  url: string;
+  serviceKey: string;
+}
+
+function getSupabaseAdminConfig(): SupabaseAdminConfig | null {
+  const url = (Deno.env.get("SUPABASE_URL") ?? "").trim().replace(/\/+$/, "");
+  const serviceKey = getSupabaseServiceKey();
+  return url && serviceKey ? { url, serviceKey } : null;
+}
+
+function supabaseAdminHeaders(serviceKey: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${serviceKey}`,
+    apikey: serviceKey,
+    "Content-Type": "application/json",
+  };
+}
+
+async function supabaseRpc<T>(functionName: string, body: Record<string, unknown>): Promise<T> {
+  const config = getSupabaseAdminConfig();
+  if (!config) throw new Error("Supabase queue is not configured.");
+  const res = await fetch(`${config.url}/rest/v1/rpc/${functionName}`, {
+    method: "POST",
+    headers: supabaseAdminHeaders(config.serviceKey),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`Supabase RPC ${functionName} failed (HTTP ${res.status}): ${await res.text()}`);
+  }
+  if (res.status === 204) return undefined as T;
+  return await res.json() as T;
+}
+
+async function enqueueImageJob(
+  jobId: string,
+  request: Record<string, unknown>,
+  payload: Record<string, unknown>,
+): Promise<number> {
+  return await supabaseRpc<number>("imagen_enqueue_image_job", {
+    p_job_id: jobId,
+    p_request: request,
+    p_payload: payload,
+  });
+}
+
+interface ImageJobRow {
+  id: string;
+  created_at: string;
+  updated_at: string;
+  status: "queued" | "processing" | "completed" | "failed";
+  request: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  attempts: number;
+}
+
+async function getImageJob(jobId: string): Promise<ImageJobRow | null> {
+  const config = getSupabaseAdminConfig();
+  if (!config) throw new Error("Supabase queue is not configured.");
+  const query = new URLSearchParams({
+    id: `eq.${jobId}`,
+    select: "id,created_at,updated_at,status,request,result,error,attempts",
+    limit: "1",
+  });
+  const res = await fetch(`${config.url}/rest/v1/image_jobs?${query}`, {
+    headers: supabaseAdminHeaders(config.serviceKey),
+  });
+  if (!res.ok) throw new Error(`Supabase image job lookup failed (HTTP ${res.status}): ${await res.text()}`);
+  const rows = await res.json() as ImageJobRow[];
+  return rows[0] ?? null;
+}
+
+async function kickImageWorker(): Promise<{ ok: boolean; detail?: string }> {
+  const config = getSupabaseAdminConfig();
+  if (!config) return { ok: false, detail: "Supabase queue is not configured." };
+  try {
+    const res = await fetch(`${config.url}/functions/v1/imagen-mcp-worker`, {
+      method: "POST",
+      headers: supabaseAdminHeaders(config.serviceKey),
+      body: JSON.stringify({ source: "imagen-mcp" }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return { ok: false, detail: `worker HTTP ${res.status}: ${await res.text()}` };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 function storageHeaders(serviceKey: string, contentType?: string): Record<string, string> {
@@ -293,19 +391,28 @@ async function pickModel(baseUrl: string, apiKey: string): Promise<ModelPick> {
  * Call POST {baseUrl}/images/generations with an OpenAI-compatible payload and
  * return an MCP tool result (markdown text + structuredContent).
  */
-async function generateImages(
+export interface ImageGenerationArgs {
+  prompt: string;
+  model?: string;
+  size?: string;
+  n?: number;
+  quality?: string;
+  style?: string;
+  extra?: Record<string, unknown>;
+}
+
+export interface ImageGenerationResult {
+  model: string;
+  created?: number;
+  images: { index: number; url: string }[];
+  warning?: string;
+}
+
+/** Execute image generation and always normalize image output to URLs. */
+export async function executeImageGeneration(
   config: ServerConfig,
-  args: {
-    prompt: string;
-    model?: string;
-    size?: string;
-    n?: number;
-    quality?: string;
-    style?: string;
-    extra?: Record<string, unknown>;
-  },
-): Promise<{ content: { type: "text"; text: string }[]; structuredContent?: unknown; isError?: boolean }> {
-  // Model resolution is stateless: explicit arg, otherwise auto-select from /models for this call.
+  args: ImageGenerationArgs,
+): Promise<ImageGenerationResult> {
   let model = args.model;
   let modelNote: string | undefined;
   if (!model) {
@@ -319,7 +426,6 @@ async function generateImages(
     prompt: args.prompt,
     n: args.n ?? 1,
   };
-  // Request URL output where OpenAI-compatible providers support it. Official GPT Image models always return base64.
   if (!/^(?:gpt[-._]?image|chatgpt[-._]?image)/i.test(model)) body.response_format = "url";
   if (args.size && args.size !== "auto") body.size = args.size;
   if (args.quality) body.quality = args.quality;
@@ -336,53 +442,57 @@ async function generateImages(
       : undefined;
     const detail = err instanceof Error ? err.message : String(err);
     const label = typeof status === "number" ? `Image API error (HTTP ${status})` : "Image API error";
-    return {
-      content: [{ type: "text", text: `${label}:\n${detail}` }],
-      isError: true,
-    };
+    throw new Error(`${label}: ${detail}`);
   }
 
   const images = Array.isArray(data.data) ? data.data : [];
-
-  const markdownLines: string[] = [];
-  if (modelNote) markdownLines.push(`> ${modelNote}`);
-  markdownLines.push(`Generated ${images.length} image(s) with model **${model}**.`);
-  const structuredImages: Record<string, unknown>[] = [];
-
+  const normalized: { index: number; url: string }[] = [];
   for (let i = 0; i < images.length; i++) {
     const img = images[i] ?? {};
-    const entry: Record<string, unknown> = { index: i };
     if (typeof img.url === "string" && img.url) {
-      entry.url = img.url;
-      markdownLines.push(`Image ${i + 1}: ${img.url}`);
-    } else if (typeof img.b64_json === "string" && img.b64_json) {
+      normalized.push({ index: i, url: img.url });
+      continue;
+    }
+    if (typeof img.b64_json === "string" && img.b64_json) {
       try {
         const url = await uploadBase64ImageToSupabase(img.b64_json, model, args);
-        entry.url = url;
-        markdownLines.push(`Image ${i + 1}: ${url}`);
+        normalized.push({ index: i, url });
+        continue;
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
-        return {
-          content: [{ type: "text", text: `Image storage fallback failed: ${detail}` }],
-          isError: true,
-        };
+        throw new Error(`Image storage fallback failed: ${detail}`);
       }
-    } else {
-      return {
-        content: [{
-          type: "text",
-          text: `Image API returned neither a URL nor base64 image data for model **${model}**.`,
-        }],
-        isError: true,
-      };
     }
-    structuredImages.push(entry);
+    throw new Error(`Image API returned neither a URL nor base64 image data for model ${model}.`);
   }
 
-  return {
-    content: [{ type: "text", text: markdownLines.join("\n\n") }],
-    structuredContent: { model, created: data.created, images: structuredImages },
-  };
+  return { model, created: data.created, images: normalized, warning: modelNote };
+}
+
+async function generateImages(
+  config: ServerConfig,
+  args: ImageGenerationArgs,
+): Promise<{ content: { type: "text"; text: string }[]; structuredContent?: unknown; isError?: boolean }> {
+  try {
+    const result = await executeImageGeneration(config, args);
+    const lines: string[] = [];
+    if (result.warning) lines.push(`> ${result.warning}`);
+    lines.push(`Generated ${result.images.length} image(s) with model **${result.model}**.`);
+    for (const image of result.images) lines.push(`Image ${image.index + 1}: ${image.url}`);
+    return {
+      content: [{ type: "text", text: lines.join("\n\n") }],
+      structuredContent: { model: result.model, created: result.created, images: result.images },
+    };
+  } catch (err) {
+    return {
+      content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
+      isError: true,
+    };
+  }
+}
+
+interface BuildServerOptions {
+  asyncQueue?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -390,14 +500,15 @@ async function generateImages(
 // ---------------------------------------------------------------------------
 
 /** Builds a fresh McpServer instance per request (serverless-friendly). */
-function buildServer(config: ServerConfig): McpServer {
+function buildServer(config: ServerConfig, options: BuildServerOptions = {}): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   server.registerTool(
     "generate_image",
     {
-      description:
-        "Generate one or more images through an OpenAI-compatible image generation API. Returns plain-text image URLs plus structured URL metadata. Base64 image content is never exposed. The API key and base URL come from request headers or apiKey/baseUrl query params.",
+      description: options.asyncQueue
+        ? "Queue an image-generation job and return a job_id immediately. Use get_image_job to poll until completed and retrieve image URLs."
+        : "Generate one or more images through an OpenAI-compatible image generation API. Returns plain-text image URLs plus structured URL metadata. Base64 image content is never exposed.",
       inputSchema: z.object({
         prompt: z.string().describe("Detailed text description of the image(s) to generate."),
         model: z
@@ -427,51 +538,94 @@ function buildServer(config: ServerConfig): McpServer {
           isError: true,
         };
       }
-      return await generateImages(config, args);
-    },
-  );
+      if (!options.asyncQueue) return await generateImages(config, args);
 
-  server.registerTool(
-    "list_image_models",
-    {
-      description: "List known image-generation models from the configured OpenAI-compatible API (GET /models), filtered by a curated regex of image-model families.",
-      inputSchema: z.object({}),
-    },
-    async () => {
-      if (!config.apiKey) {
+      const admin = getSupabaseAdminConfig();
+      if (!admin) {
         return {
-          content: [{
-            type: "text",
-            text: "No API key provided. Pass it via the `X-OpenAI-Api-Key` header, `Authorization: Bearer <key>`, or the `apiKey` query parameter.",
-          }],
+          content: [{ type: "text", text: "Supabase Queue mode is not configured on this deployment." }],
           isError: true,
         };
       }
-      const endpoint = `${config.baseUrl}/models`;
-      const res = await fetch(endpoint, {
-        headers: { Authorization: `Bearer ${config.apiKey}` },
-      });
-      if (!res.ok) {
+
+      const jobId = crypto.randomUUID();
+      const requestSummary: Record<string, unknown> = {
+        ...(args.model ? { model: args.model } : {}),
+        ...(args.size ? { size: args.size } : {}),
+        n: args.n ?? 1,
+        ...(args.quality ? { quality: args.quality } : {}),
+        ...(args.style ? { style: args.style } : {}),
+      };
+      try {
+        await enqueueImageJob(jobId, requestSummary, {
+          job_id: jobId,
+          api_key: config.apiKey,
+          base_url: config.baseUrl,
+          args,
+        });
+      } catch (err) {
         return {
-          content: [{ type: "text", text: `Models API error (HTTP ${res.status}): ${await res.text()}` }],
+          content: [{ type: "text", text: `Failed to queue image generation: ${err instanceof Error ? err.message : String(err)}` }],
           isError: true,
         };
       }
-      const data = (await res.json()) as { data?: { id?: string }[] };
-      const models = (data.data ?? [])
-        .map((m) => m.id)
-        .filter((id): id is string => typeof id === "string" && looksImageCapable(id));
+
+      const kick = await kickImageWorker();
+      const text = kick.ok
+        ? `Image generation queued.\njob_id: ${jobId}\nstatus: queued\nCall get_image_job with this job_id to retrieve the result.`
+        : `Image generation queued.\njob_id: ${jobId}\nstatus: queued\nworker kick warning: ${kick.detail ?? "unknown error"}\nCall get_image_job with this job_id to retry/kick processing and retrieve the result.`;
       return {
-        content: [{
-          type: "text",
-          text: models.length
-            ? `Available image models (${models.length}):\n${models.join("\n")}`
-            : "No known image-generation models matched the configured API's model list.",
-        }],
-        structuredContent: { models },
+        content: [{ type: "text", text }],
+        structuredContent: { job_id: jobId, status: "queued", worker_kicked: kick.ok },
       };
     },
   );
+
+  if (options.asyncQueue) {
+    server.registerTool(
+      "get_image_job",
+      {
+        description: "Get the status and result URLs for a queued image generation job.",
+        inputSchema: z.object({
+          job_id: z.string().uuid().describe("Job id returned by generate_image."),
+        }),
+      },
+      async (args) => {
+        let job: ImageJobRow | null;
+        try {
+          job = await getImageJob(args.job_id);
+        } catch (err) {
+          return {
+            content: [{ type: "text", text: `Failed to read image job: ${err instanceof Error ? err.message : String(err)}` }],
+            isError: true,
+          };
+        }
+        if (!job) {
+          return { content: [{ type: "text", text: `Image job not found: ${args.job_id}` }], isError: true };
+        }
+        if (job.status === "queued" || job.status === "processing") {
+          await kickImageWorker();
+        }
+        const summary: Record<string, unknown> = {
+          job_id: job.id,
+          status: job.status,
+          attempts: job.attempts,
+          ...(job.result ? { result: job.result } : {}),
+          ...(job.error ? { error: job.error } : {}),
+        };
+        const lines = [`job_id: ${job.id}`, `status: ${job.status}`];
+        if (job.result?.images && Array.isArray(job.result.images)) {
+          for (const [index, image] of job.result.images.entries()) {
+            if (image && typeof image === "object" && "url" in image && typeof image.url === "string") {
+              lines.push(`Image ${index + 1}: ${image.url}`);
+            }
+          }
+        }
+        if (job.error) lines.push(`error: ${job.error}`);
+        return { content: [{ type: "text", text: lines.join("\n") }], structuredContent: summary };
+      },
+    );
+  }
 
   server.registerTool(
     "list_models",
@@ -551,6 +705,12 @@ function buildServer(config: ServerConfig): McpServer {
 export const mcpHandler = createMcpHandler((ctx) => {
   const config = extractConfig(ctx.requestInfo ?? new Request("http://localhost/"));
   return buildServer(config);
+});
+
+/** Supabase deployment variant: generate_image is queued and get_image_job is exposed. */
+export const supabaseMcpHandler = createMcpHandler((ctx) => {
+  const config = extractConfig(ctx.requestInfo ?? new Request("http://localhost/"));
+  return buildServer(config, { asyncQueue: true });
 });
 
 // ---------------------------------------------------------------------------

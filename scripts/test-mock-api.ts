@@ -10,7 +10,6 @@
  *   - generate_image via X-OpenAI-* headers (model auto-selected from /models)
  *   - generate_image via URL query params
  *   - generate_image via Authorization: Bearer
- *   - list_image_models via headers
  *   - list_models returns all models and supports keyword filtering
  *   - missing API key -> helpful error
  *   - stateless model auto-selection (re-queries /models when model is omitted)
@@ -169,18 +168,7 @@ async function main() {
   }
   console.log(`/models called ${modelsCalls} time(s) so far — stateless auto-selection ✅`);
 
-  console.log("\n=== D. list_image_models via headers ===");
-  const imageModels = await post(BASE, rpc(4, "tools/call", { name: "list_image_models", arguments: {} }), HEADERS);
-  console.log(`status: ${imageModels.status}`);
-  const imageModelsResult = resultOf(imageModels.text) as RpcResult;
-  console.log("image models:", JSON.stringify(imageModelsResult?.result?.structuredContent));
-  const listedImages = (imageModelsResult?.result?.structuredContent as { models?: string[] } | undefined)?.models ?? [];
-  const expectedImageModels = ["dall-e-3", "gpt-image-1", "flux-1.1-pro", "qwen-image-2.0", "recraft-v3"];
-  if (JSON.stringify(listedImages) !== JSON.stringify(expectedImageModels)) {
-    throw new Error(`FAIL: list_image_models should only return known image models, got ${JSON.stringify(listedImages)}`);
-  }
-
-  console.log("\n=== E. list_models all + keyword filtering ===");
+  console.log("\n=== D. list_models all + keyword filtering ===");
   const allModelsCall = await post(BASE, rpc(5, "tools/call", { name: "list_models", arguments: {} }), HEADERS);
   const allModelsResult = resultOf(allModelsCall.text) as RpcResult;
   const allModels = (allModelsResult?.result?.structuredContent as { models?: string[] } | undefined)?.models ?? [];
@@ -209,7 +197,7 @@ async function main() {
   }
   console.log("list_models all + keyword filters OK");
 
-  console.log("\n=== F. missing API key -> helpful error ===");
+  console.log("\n=== E. missing API key -> helpful error ===");
   const noKey = await post(BASE, rpc(8, "tools/call", {
     name: "generate_image",
     arguments: { prompt: "a cute corgi astronaut" },
@@ -222,7 +210,7 @@ async function main() {
     throw new Error("FAIL: expected 'No API key provided' error");
   }
 
-  console.log("\n=== G. explicit model is not persisted ===");
+  console.log("\n=== F. explicit model is not persisted ===");
   const modelsBefore = modelsCalls;
   const g1 = await post(BASE, rpc(9, "tools/call", {
     name: "generate_image",
@@ -251,7 +239,7 @@ async function main() {
   }
   console.log("explicit model was not persisted; next omitted model re-queried /models ✅");
 
-  console.log("\n=== H. base64-only provider is uploaded to Supabase Storage ===");
+  console.log("\n=== G. base64-only provider is uploaded to Supabase Storage ===");
   const base64Only = await post(BASE, rpc(11, "tools/call", {
     name: "generate_image",
     arguments: { prompt: "a cat", model: "gpt-image-1" },

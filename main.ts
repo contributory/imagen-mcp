@@ -269,18 +269,6 @@ function buildServer(config) {
     return await generateImages(config, args);
   });
 
-  server.registerTool("list_image_models", {
-    description: "List known image-generation models from GET {baseUrl}/models, filtered by a curated regex of image-model families.",
-    inputSchema: z.object({}),
-  }, async () => {
-    if (!config.apiKey) return { content: [{ type: "text", text: "No API key. Pass X-OpenAI-Api-Key / Authorization: Bearer <key> / ?apiKey=..., or set OPENAI_API_KEY." }], isError: true };
-    const res = await fetch(`${config.baseUrl}/models`, { headers: { Authorization: `Bearer ${config.apiKey}` } });
-    if (!res.ok) return { content: [{ type: "text", text: `Models API error (HTTP ${res.status}): ${await res.text()}` }], isError: true };
-    const data = await res.json();
-    const models = (data.data ?? []).map(m => m.id).filter(id => typeof id === "string" && looksImageCapable(id));
-    return { content: [{ type: "text", text: models.length ? `Available image models (${models.length}):\n${models.join("\n")}` : "No known image-generation models matched the configured API's model list." }], structuredContent: { models } };
-  });
-
   server.registerTool("list_models", {
     description: "List all models from GET {baseUrl}/models. Optionally filter model names by a keyword string; whitespace- or comma-separated terms are matched case-insensitively and all terms must be present.",
     inputSchema: z.object({

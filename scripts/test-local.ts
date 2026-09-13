@@ -55,7 +55,7 @@ async function main() {
   console.log(`status: ${tools.status}`);
   console.log(pretty(tools.text));
   const toolNames = [...tools.text.matchAll(/"name":"([^"]+)"/g)].map((m) => m[1]);
-  for (const name of ["generate_image", "list_image_models", "list_models"]) {
+  for (const name of ["generate_image", "list_models"]) {
     if (!toolNames.includes(name)) throw new Error(`FAIL: tools/list missing ${name}`);
   }
   console.log("tools:", toolNames.join(", "));

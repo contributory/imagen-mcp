@@ -17,7 +17,7 @@ Each request to the MCP server can carry its own configuration:
 | API key | `X-OpenAI-Api-Key` | `apiKey` | ✅ |
 | Base URL | `X-OpenAI-Base-Url` | `baseUrl` | ❌ (defaults to `https://api.openai.com/v1`) |
 
-> 🤖 **Model does not need to be passed** — when `model` is omitted, the server calls `GET {baseUrl}/models` for that request and selects an image-generation model. Model selection and credentials are not persisted. Images are stored only when a provider returns base64 and a URL must be produced.
+> 🤖 **Model does not need to be passed** — when `model` is omitted, the worker/server calls `GET {baseUrl}/models` for that generation and selects an image-generation model. The Supabase queue temporarily stores the upstream credentials/prompt until processing finishes; `image_jobs` keeps only status, non-secret request metadata, and the URL result.
 
 API key can also be passed via the standard header: `Authorization: Bearer <apiKey>`.
 
@@ -44,14 +44,14 @@ curl -X POST "https://<username>-<valname>.web.val.run/?apiKey=sk-...&baseUrl=ht
 
 ## ✨ Features
 
-- **`generate_image`** — uses the official OpenAI JavaScript/TypeScript SDK (`client.images.generate`) against the configured `baseUrl` (DALL·E 3, GPT Image models, and OpenAI-compatible providers)
-  - Model **auto-selected per request** from `GET /models` (preferring image-generation models) when `model` is omitted; nothing is persisted
-  - Supports `prompt`, `size`, `n`, `quality`, `style`
-  - `extra` parameter to pass any additional fields to the provider
-  - Returns plain-text image URLs + URL-only `structuredContent`; provider URLs are passed through directly, while base64-only results are uploaded to Supabase Storage and returned as Storage URLs
-- **`list_image_models`** — lists only known image-generation models from `GET /models` using a curated regex
+- **`generate_image`** — on Supabase, queues an image-generation job and returns `job_id` immediately instead of holding the HTTP request open. On the standalone/Val Town handler it remains synchronous.
+  - Model is auto-selected from `GET /models` when `model` is omitted
+  - Supports `prompt`, `size`, `n`, `quality`, `style`, and `extra`
+  - The Supabase worker calls the OpenAI-compatible API in the background
+  - Provider URLs are passed through directly; base64-only results are uploaded to Supabase Storage and normalized to URLs
+- **`get_image_job`** — Supabase-only tool used to poll a queued job until `completed`/`failed`; completed jobs return URL-only results
 - **`list_models`** — lists all models from `GET /models`; optional `keywords` filters model ids case-insensitively using whitespace/comma-separated terms
-- Upstream API credentials stay per-request. Supabase Storage fallback uses the deployment project's `SUPABASE_URL` and Supabase secret key (`SUPABASE_SECRET_KEYS` on current Edge Functions; legacy `SUPABASE_SERVICE_ROLE_KEY` is also supported)
+- Upstream API credentials arrive per request. On Supabase async mode they are copied into the PGMQ message only for the lifetime of the queued job, then the message is deleted at terminal completion/failure.
 - Runs safely serverless: each request creates a new `McpServer` instance (per-request factory)
 
 ---
@@ -60,14 +60,19 @@ curl -X POST "https://<username>-<valname>.web.val.run/?apiKey=sk-...&baseUrl=ht
 
 ```
 imagen-mcp/
-├── mcp-image-server.ts      # Main val file — paste directly into Val Town
-├── deno.json                # Tasks: serve / test / test:mock / check
-├── README.md
-├── .gitignore
+├── mcp-image-server.ts      # Core MCP + synchronous generation runtime
+├── supabase-queue.ts        # Supabase Queue/job helpers
+├── deno.json                # Tasks: serve / test / test:mock / test:queue / check
+├── supabase/
+│   ├── migrations/          # PGMQ + image_jobs schema/RPC migration
+│   └── functions/
+│       ├── imagen-mcp/      # Async MCP endpoint
+│       └── imagen-mcp-worker/ # Background queue consumer
 └── scripts/
-    ├── serve-local.ts       # Run HTTP server locally (test with real MCP client)
-    ├── test-local.ts        # Smoke test: initialize → tools/list → tools/call
-    └── test-mock-api.ts     # E2E test: header / query param / Authorization
+    ├── serve-local.ts
+    ├── test-local.ts
+    ├── test-mock-api.ts
+    └── test-queue.ts
 ```
 
 ---
@@ -95,12 +100,28 @@ npx valtown val create --http <username>/imagen-mcp
 
 ## ☁️ Deploy to Supabase Edge Functions
 
+### Async queue architecture
+
+The Supabase deployment uses **PGMQ / Supabase Queues** to avoid the Edge Function HTTP response timeout:
+
+1. `generate_image` creates an `image_jobs` row, writes the processing payload to the `image_generation_jobs` queue, kicks `imagen-mcp-worker`, and returns `job_id` immediately.
+2. `imagen-mcp-worker` claims one queue message and runs generation in `EdgeRuntime.waitUntil(...)`, so its HTTP request returns immediately while processing continues within the Edge Runtime wall-clock limit.
+3. The worker stores URL-only results in `image_jobs`. Base64-only provider output is first uploaded to Supabase Storage.
+4. `get_image_job` reads the job status/result and also re-kicks the worker for queued/processing jobs.
+
+The queue payload temporarily contains the upstream API key, base URL, prompt, and generation arguments because the durable worker needs them after the original request has returned. The message is deleted from PGMQ after the job reaches `completed` or `failed`. The `image_jobs` table does **not** store the upstream API key or prompt.
+
+The migration in `supabase/migrations/` creates the PGMQ queue, `image_jobs`, and service-role-only RPC wrappers.
+
+
 A public Supabase Edge Function entrypoint is included at `supabase/functions/imagen-mcp/index.ts`. The function is configured with `verify_jwt = false`, so Supabase does not require a Supabase JWT before the MCP request reaches the server. The OpenAI-compatible credentials are still supplied per request through the existing `X-OpenAI-Api-Key` / `X-OpenAI-Base-Url` headers or `apiKey` / `baseUrl` query parameters.
 
 ```bash
 supabase login
-supabase link --project-ref <your-project-ref>
-supabase functions deploy imagen-mcp
+supabase link --project-ref <your-project-ref> --password '<database-password>'
+supabase db push --linked --password '<database-password>'
+supabase functions deploy imagen-mcp-worker --no-verify-jwt
+supabase functions deploy imagen-mcp --no-verify-jwt
 ```
 
 After deployment, use:
@@ -125,8 +146,9 @@ Configure these environment variables in the CircleCI project settings:
 
 - `SUPABASE_ACCESS_TOKEN` — Supabase personal access token used by the CLI.
 - `SUPABASE_PROJECT_REF` — the target Supabase project ref.
+- `SUPABASE_DB_PASSWORD` — remote Postgres password used by `supabase db push` to apply the queue migration.
 
-The deploy command keeps the function public with `--no-verify-jwt`, matching `supabase/config.toml`.
+CI applies migrations first, then deploys `imagen-mcp-worker`, then `imagen-mcp`. Both HTTP functions use `--no-verify-jwt`; the worker performs its own service-key authorization before accepting a kick request.
 
 ### Supabase Storage fallback
 
@@ -226,7 +248,7 @@ Generated 1 image(s) with model **dall-e-3**.
 | vLLM / LiteLLM | `http://localhost:8000/v1` | running locally |
 | Ollama | `http://localhost:11434/v1` | (depends on model) |
 
-> 💡 The server is URL-only and stateless. If a provider/model returns only base64 image data and no URL, `generate_image` returns an error instead of exposing or storing the image bytes.
+> 💡 Tool results are URL-only. If a provider returns only base64 image data, the generation runtime uploads those bytes to Supabase Storage and returns the resulting URL; base64 is never exposed to the MCP client.
 
 ---
 
