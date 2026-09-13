@@ -16,8 +16,9 @@ Each request to the MCP server can carry its own configuration:
 |---|---|---|---|
 | API key | `X-OpenAI-Api-Key` | `apiKey` | ✅ |
 | Base URL | `X-OpenAI-Base-Url` | `baseUrl` | ❌ (defaults to `https://api.openai.com/v1`) |
+| Default model | — | `defaultModel` | ❌ |
 
-> 🤖 **Model does not need to be passed** — when `model` is omitted, the worker/server calls `GET {baseUrl}/models` for that generation and selects an image-generation model. The Supabase queue temporarily stores the upstream credentials/prompt until processing finishes; `image_jobs` keeps only status, non-secret request metadata, and the URL result.
+> 🤖 **Model does not need to be passed in every tool call** — precedence is `generate_image.model` → `defaultModel` query param → automatic selection from `GET {baseUrl}/models`. The Supabase queue temporarily stores the upstream credentials/prompt until processing finishes; `image_jobs` keeps only status, non-secret request metadata, and the URL result.
 
 API key can also be passed via the standard header: `Authorization: Bearer <apiKey>`.
 
@@ -35,7 +36,7 @@ curl -X POST https://<username>-<valname>.web.val.run/ \
 **Or via query param:**
 
 ```bash
-curl -X POST "https://<username>-<valname>.web.val.run/?apiKey=sk-...&baseUrl=https%3A%2F%2Fapi.openai.com%2Fv1" \
+curl -X POST "https://<username>-<valname>.web.val.run/?apiKey=sk-...&baseUrl=https%3A%2F%2Fapi.openai.com%2Fv1&defaultModel=gpt-image-1" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
@@ -45,7 +46,7 @@ curl -X POST "https://<username>-<valname>.web.val.run/?apiKey=sk-...&baseUrl=ht
 ## ✨ Features
 
 - **`generate_image`** — on Supabase, queues an image-generation job and returns `job_id` immediately instead of holding the HTTP request open. On the standalone/Val Town handler it remains synchronous.
-  - Model is auto-selected from `GET /models` when `model` is omitted
+  - Model precedence: explicit `model` → endpoint `defaultModel` query param → auto-select from `GET /models`
   - Supports `prompt`, `size`, `n`, `quality`, `style`, and `extra`
   - The Supabase worker calls the OpenAI-compatible API in the background
   - Provider URLs are passed through directly; base64-only results are uploaded to Supabase Storage and normalized to URLs
@@ -109,7 +110,7 @@ The Supabase deployment uses **PGMQ / Supabase Queues** to avoid the Edge Functi
 3. The worker stores URL-only results in `image_jobs`. Base64-only provider output is first uploaded to Supabase Storage.
 4. `get_image_job` reads the job status/result and also re-kicks the worker for queued/processing jobs.
 
-The queue payload temporarily contains the upstream API key, base URL, prompt, and generation arguments because the durable worker needs them after the original request has returned. The message is deleted from PGMQ after the job reaches `completed` or `failed`. The `image_jobs` table does **not** store the upstream API key or prompt.
+The queue payload temporarily contains the upstream API key, base URL, `defaultModel` (when supplied), prompt, and generation arguments because the durable worker needs them after the original request has returned. The message is deleted from PGMQ after the job reaches `completed` or `failed`. The `image_jobs` table does **not** store the upstream API key or prompt.
 
 The migration in `supabase/migrations/` creates the PGMQ queue, `image_jobs`, and service-role-only RPC wrappers.
 
@@ -133,7 +134,7 @@ https://<your-project-ref>.supabase.co/functions/v1/imagen-mcp
 Example query-param form:
 
 ```text
-https://<your-project-ref>.supabase.co/functions/v1/imagen-mcp?apiKey=sk-...&baseUrl=https%3A%2F%2Fapi.openai.com%2Fv1
+https://<your-project-ref>.supabase.co/functions/v1/imagen-mcp?apiKey=sk-...&baseUrl=https%3A%2F%2Fapi.openai.com%2Fv1&defaultModel=gpt-image-1
 ```
 
 > `verify_jwt = false` makes the Edge Function itself public. Do not hard-code provider API keys in the function; send them per request as described above.

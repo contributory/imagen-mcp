@@ -57,7 +57,7 @@ function rpc(id: number, method: string, params?: unknown): string {
 }
 
 async function post(body: string): Promise<{ status: number; text: string }> {
-  const req = new Request("http://localhost/mcp", {
+  const req = new Request("http://localhost/mcp?defaultModel=qwen-image-2.0", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -88,15 +88,16 @@ try {
   console.log("=== enqueue generate_image ===");
   const generated = resultOf((await post(rpc(2, "tools/call", {
     name: "generate_image",
-    arguments: { prompt: "queue me", model: "gpt-image-1", n: 1 },
+    arguments: { prompt: "queue me", n: 1 },
   }))).text);
   const structured = (generated.result as { structuredContent?: { job_id?: string; status?: string } })?.structuredContent;
   if (!structured?.job_id || structured.status !== "queued") throw new Error(`unexpected enqueue result ${JSON.stringify(structured)}`);
   if (!jobState.current || jobState.current.id !== structured.job_id) throw new Error("job row was not created");
-  const payload = queuedPayload as { api_key?: string; base_url?: string; args?: { prompt?: string } } | null;
-  if (payload?.api_key !== "upstream-secret" || payload.base_url !== "https://images.example.test/v1") {
+  const payload = queuedPayload as { api_key?: string; base_url?: string; default_model?: string; args?: { prompt?: string } } | null;
+  if (payload?.api_key !== "upstream-secret" || payload.base_url !== "https://images.example.test/v1" || payload.default_model !== "qwen-image-2.0") {
     throw new Error(`queue payload missing upstream config: ${JSON.stringify(payload)}`);
   }
+  if (jobState.current.request.default_model !== "qwen-image-2.0") throw new Error(`job metadata missing default model: ${JSON.stringify(jobState.current.request)}`);
   if (workerKicks !== 1) throw new Error(`expected initial worker kick, got ${workerKicks}`);
   console.log("queued:", structured.job_id);
 
@@ -112,7 +113,7 @@ try {
   jobState.current.status = "completed";
   jobState.current.attempts = 1;
   jobState.current.result = {
-    model: "gpt-image-1",
+    model: "qwen-image-2.0",
     images: [{ index: 0, url: "https://storage.example.test/image.png" }],
   };
 

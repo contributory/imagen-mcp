@@ -41,8 +41,13 @@ function extractConfig(req) {
   if (!apiKey) apiKey = process.env.OPENAI_API_KEY ?? process.env.X_OPENAI_API_KEY ?? "";
 
   let baseUrl = getHeader(req, "x-openai-base-url") || url.searchParams.get("baseUrl") || process.env.OPENAI_BASE_URL || DEFAULT_BASE_URL;
+  const defaultModel = String(url.searchParams.get("defaultModel") || "").trim();
 
-  return { apiKey: String(apiKey).trim(), baseUrl: String(baseUrl).trim().replace(/\/+$/, "") };
+  return {
+    apiKey: String(apiKey).trim(),
+    baseUrl: String(baseUrl).trim().replace(/\/+$/, ""),
+    ...(defaultModel ? { defaultModel } : {}),
+  };
 }
 
 
@@ -194,7 +199,7 @@ async function pickModel(baseUrl, apiKey) {
 
 // ---- core ----
 async function generateImages(config, args) {
-  let model = args.model;
+  let model = args.model ?? config.defaultModel;
   let modelNote;
   if (!model) {
     const picked = await pickModel(config.baseUrl, config.apiKey);
@@ -257,7 +262,7 @@ function buildServer(config) {
     description: "Generate images via OpenAI-compatible API. Config via headers X-OpenAI-Api-Key / X-OpenAI-Base-Url, query ?apiKey=&baseUrl=, or env OPENAI_API_KEY/OPENAI_BASE_URL.",
     inputSchema: z.object({
       prompt: z.string().describe("Detailed text description of the image(s) to generate."),
-      model: z.string().optional().describe("Optional model override. Omit to auto-select from GET /models for this request."),
+      model: z.string().optional().describe("Optional model override. When omitted, defaultModel from the endpoint query string is used; otherwise auto-select from GET /models."),
       size: z.enum(["256x256","512x512","1024x1024","1024x1792","1792x1024","auto"]).optional(),
       n: z.number().int().min(1).max(10).optional(),
       quality: z.enum(["standard","hd"]).optional(),

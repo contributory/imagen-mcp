@@ -15,6 +15,7 @@ interface QueuePayload {
   job_id: string;
   api_key: string;
   base_url: string;
+  default_model?: string;
   args: ImageGenerationArgs;
 }
 
@@ -58,6 +59,7 @@ export async function processImageQueueOnce(): Promise<Record<string, unknown>> 
   const config: ServerConfig = {
     apiKey: payload.api_key,
     baseUrl: payload.base_url.replace(/\/+$/, ""),
+    ...(payload.default_model ? { defaultModel: payload.default_model } : {}),
   };
 
   try {

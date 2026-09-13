@@ -17,11 +17,11 @@
  *     X-OpenAI-Api-Key: <api key>                  (required)
  *     X-OpenAI-Base-Url: https://api.openai.com/v1 (optional)
  *   Alternative for the key:  Authorization: Bearer <api key>
- *   Or as URL query params:   ?apiKey=...&baseUrl=...
+ *   Or as URL query params:   ?apiKey=...&baseUrl=...&defaultModel=...
  *
- *   The model is NOT configured by the client — it is auto-selected by calling
- *   GET {baseUrl}/models (preferring an image-capable model id). An optional
- *   `model` argument on generate_image can still override it per call.
+ *   `defaultModel` can be supplied as a query parameter. The `model` tool
+ *   argument overrides it per call; otherwise the server falls back to model
+ *   auto-selection from GET {baseUrl}/models.
  *
  * DEPLOY ON VAL TOWN
  *   1. Create a new HTTP val (or open the file in the Val Town editor) and
@@ -56,6 +56,7 @@ const DEFAULT_MODEL = "dall-e-3";
 export interface ServerConfig {
   apiKey: string;
   baseUrl: string;
+  defaultModel?: string;
 }
 
 /** Read a value from a header first, then from a URL query parameter. */
@@ -85,8 +86,13 @@ function extractConfig(req: Request): ServerConfig {
   }
 
   const baseUrl = headerOrParam(headers, "x-openai-base-url", url.searchParams, "baseUrl", DEFAULT_BASE_URL);
+  const defaultModel = (url.searchParams.get("defaultModel") ?? "").trim();
 
-  return { apiKey, baseUrl: baseUrl.replace(/\/+$/, "") };
+  return {
+    apiKey,
+    baseUrl: baseUrl.replace(/\/+$/, ""),
+    ...(defaultModel ? { defaultModel } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +419,7 @@ export async function executeImageGeneration(
   config: ServerConfig,
   args: ImageGenerationArgs,
 ): Promise<ImageGenerationResult> {
-  let model = args.model;
+  let model = args.model ?? config.defaultModel;
   let modelNote: string | undefined;
   if (!model) {
     const picked = await pickModel(config.baseUrl, config.apiKey);
@@ -514,7 +520,7 @@ function buildServer(config: ServerConfig, options: BuildServerOptions = {}): Mc
         model: z
           .string()
           .optional()
-          .describe("Optional model override. When omitted, the server auto-selects a model from GET /models for this request."),
+          .describe("Optional model override. When omitted, defaultModel from the endpoint query string is used; otherwise the server auto-selects from GET /models."),
         size: z
           .enum(["256x256", "512x512", "1024x1024", "1024x1792", "1792x1024", "auto"])
           .optional()
@@ -551,6 +557,7 @@ function buildServer(config: ServerConfig, options: BuildServerOptions = {}): Mc
       const jobId = crypto.randomUUID();
       const requestSummary: Record<string, unknown> = {
         ...(args.model ? { model: args.model } : {}),
+        ...(!args.model && config.defaultModel ? { default_model: config.defaultModel } : {}),
         ...(args.size ? { size: args.size } : {}),
         n: args.n ?? 1,
         ...(args.quality ? { quality: args.quality } : {}),
@@ -561,6 +568,7 @@ function buildServer(config: ServerConfig, options: BuildServerOptions = {}): Mc
           job_id: jobId,
           api_key: config.apiKey,
           base_url: config.baseUrl,
+          ...(config.defaultModel ? { default_model: config.defaultModel } : {}),
           args,
         });
       } catch (err) {

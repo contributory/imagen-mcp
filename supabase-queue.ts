@@ -27,6 +27,7 @@ export interface ImageQueueMessage {
     job_id?: string;
     api_key?: string;
     base_url?: string;
+    default_model?: string;
     args?: Record<string, unknown>;
   };
 }

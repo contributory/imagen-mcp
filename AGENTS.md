@@ -48,12 +48,12 @@ is the Val Town-injected `valtown` secret, used purely to detect the platform).
 ### Model resolution (generate_image)
 
 Model resolution itself is stateless. Resolution order:
-1. Explicit `model` tool argument (optional override).
-2. Otherwise `pickModel(baseUrl, apiKey)` calls `GET {baseUrl}/models` for that
-   request, filtering candidates through `IMAGE_MODEL_REGEX`,
-   dall-e, flux, sdxl, stable-diffusion, imagen, ...), else the first id, else
-   `DEFAULT_MODEL` with a warning.
-The standalone generation path does not remember model selection. On Supabase, PGMQ temporarily persists the upstream API key, base URL, prompt, and arguments until the worker reaches a terminal state and deletes the queue message. `image_jobs` stores no upstream API key or prompt. Base64-only generated images are persisted to Supabase Storage to obtain a URL.
+1. Explicit `model` tool argument.
+2. `defaultModel` query parameter on the MCP endpoint.
+3. Otherwise `pickModel(baseUrl, apiKey)` calls `GET {baseUrl}/models` for that request and filters candidates through `IMAGE_MODEL_REGEX`.
+4. If model listing fails or returns no known image model, use `DEFAULT_MODEL` with a warning.
+
+The standalone generation path does not remember model selection. On Supabase, PGMQ temporarily persists the upstream API key, base URL, optional `defaultModel`, prompt, and arguments until the worker reaches a terminal state and deletes the queue message. `image_jobs` stores no upstream API key or prompt. Base64-only generated images are persisted to Supabase Storage to obtain a URL.
 
 ### Tools
 
@@ -67,7 +67,7 @@ The standalone generation path does not remember model selection. On Supabase, P
 - The Supabase MCP wrapper uses `supabaseMcpHandler`: `generate_image` enqueues into PGMQ and returns `job_id`; `get_image_job` polls results.
 - Queue/database helpers live in `supabase-queue.ts`; the worker entrypoint is `supabase/functions/imagen-mcp-worker/index.ts`.
 - Migration `supabase/migrations/20260913090000_image_generation_queue.sql` creates `image_jobs`, the PGMQ queue, and service-role-only RPCs.
-- Queue payloads temporarily contain the upstream API key and prompt; messages are deleted after terminal completion/failure. `image_jobs` does not persist those secrets/content.
+- Queue payloads temporarily contain the upstream API key, optional `defaultModel`, and prompt; messages are deleted after terminal completion/failure. `image_jobs` does not persist those secrets/content.
 - CI needs `SUPABASE_DB_PASSWORD` in addition to access token/project ref so migrations are applied before function deployment.
 
 ### Supabase Storage fallback

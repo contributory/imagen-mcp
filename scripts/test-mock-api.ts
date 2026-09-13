@@ -137,18 +137,21 @@ async function main() {
   console.log("structuredContent:", JSON.stringify(structured));
 
   console.log("\n=== B. generate_image via URL query params ===");
-  const qs = `?apiKey=test-key-123&baseUrl=${encodeURIComponent("http://127.0.0.1:8788/v1")}`;
+  const qs = `?apiKey=test-key-123&baseUrl=${encodeURIComponent("http://127.0.0.1:8788/v1")}&defaultModel=${encodeURIComponent("qwen-image-2.0")}`;
   const callQs = await post(BASE + qs, rpc(2, "tools/call", {
     name: "generate_image",
     arguments: { prompt: "a cute corgi astronaut" },
   }));
   console.log(`status: ${callQs.status}`);
   const structuredQs = resultOf(callQs.text) as RpcResult;
-  const qsImages = structuredQs?.result?.structuredContent as { images?: { url?: string }[] } | undefined;
-  if (qsImages?.images?.[0]?.url !== MOCK_URL) {
-    throw new Error(`FAIL: query-param variant, got ${JSON.stringify(qsImages?.images)}`);
+  const qsImages = structuredQs?.result?.structuredContent as { model?: string; images?: { url?: string }[] } | undefined;
+  if (qsImages?.images?.[0]?.url !== MOCK_URL || qsImages.model !== "qwen-image-2.0") {
+    throw new Error(`FAIL: query-param defaultModel variant, got ${JSON.stringify(qsImages)}`);
   }
-  console.log("query-param variant OK:", JSON.stringify(qsImages));
+  if (String(lastGenerationModel) !== "qwen-image-2.0") {
+    throw new Error(`FAIL: defaultModel query param was not used, got ${lastGenerationModel}`);
+  }
+  console.log("query-param defaultModel variant OK:", JSON.stringify(qsImages));
 
   console.log("\n=== C. generate_image via Authorization: Bearer ===");
   const callAuth = await post(BASE, rpc(3, "tools/call", {
@@ -162,11 +165,11 @@ async function main() {
     throw new Error(`FAIL: Authorization variant, got ${JSON.stringify(authStructured?.images)}`);
   }
   console.log("Authorization variant OK");
-  // Stateless behavior: each call without an explicit model queries /models.
-  if (modelsCalls !== 3) {
-    throw new Error(`FAIL: expected /models queried once per generation without model, got ${modelsCalls} calls`);
+  // Calls with defaultModel skip /models; calls without model/defaultModel still auto-select.
+  if (modelsCalls !== 2) {
+    throw new Error(`FAIL: expected /models queried only for calls without defaultModel, got ${modelsCalls} calls`);
   }
-  console.log(`/models called ${modelsCalls} time(s) so far — stateless auto-selection ✅`);
+  console.log(`/models called ${modelsCalls} time(s) so far — defaultModel bypass + stateless auto-selection ✅`);
 
   console.log("\n=== D. list_models all + keyword filtering ===");
   const allModelsCall = await post(BASE, rpc(5, "tools/call", { name: "list_models", arguments: {} }), HEADERS);
