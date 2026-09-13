@@ -12,7 +12,7 @@
  *   - generate_image via Authorization: Bearer
  *   - list_models via headers
  *   - missing API key -> helpful error
- *   - remembered model reused (no re-query of /models)
+ *   - stateless model auto-selection (re-queries /models when model is omitted)
  */
 
 const { mcpHandler } = await import("../mcp-image-server.ts");
@@ -128,11 +128,11 @@ async function main() {
     throw new Error(`FAIL: Authorization variant, got ${JSON.stringify(authStructured?.images)}`);
   }
   console.log("Authorization variant OK");
-  // A, B, C all share the same base URL, so /models should only have been queried once (model remembered).
-  if (modelsCalls !== 1) {
-    throw new Error(`FAIL: expected /models queried once (remembered model reused), got ${modelsCalls} calls`);
+  // Stateless behavior: each call without an explicit model queries /models.
+  if (modelsCalls !== 3) {
+    throw new Error(`FAIL: expected /models queried once per generation without model, got ${modelsCalls} calls`);
   }
-  console.log(`/models called ${modelsCalls} time(s) so far — remembered model reused ✅`);
+  console.log(`/models called ${modelsCalls} time(s) so far — stateless auto-selection ✅`);
 
   console.log("\n=== D. list_models via headers ===");
   const models = await post(BASE, rpc(4, "tools/call", { name: "list_models", arguments: {} }), HEADERS);
@@ -153,8 +153,7 @@ async function main() {
     throw new Error("FAIL: expected 'No API key provided' error");
   }
 
-  console.log("\n=== F. remember last-used model ===");
-  // Explicitly set a different model, then call again without `model` → it must reuse the remembered one.
+  console.log("\n=== F. explicit model is not persisted ===");
   const modelsBefore = modelsCalls;
   const g1 = await post(BASE, rpc(7, "tools/call", {
     name: "generate_image",
@@ -165,19 +164,23 @@ async function main() {
   if (g1Model !== "flux-1.1-pro") {
     throw new Error(`FAIL: explicit model not used, got ${g1Model}`);
   }
+  if (modelsCalls !== modelsBefore) {
+    throw new Error(`FAIL: explicit model should not call /models, got ${modelsCalls - modelsBefore} extra calls`);
+  }
+
   const g2 = await post(BASE, rpc(8, "tools/call", {
     name: "generate_image",
     arguments: { prompt: "a moon" },
   }), HEADERS);
   const g2Result = resultOf(g2.text) as RpcResult;
   const g2Model = (g2Result?.result?.structuredContent as { model?: string } | undefined)?.model;
-  if (g2Model !== "flux-1.1-pro") {
-    throw new Error(`FAIL: expected remembered model flux-1.1-pro, got ${g2Model}`);
+  if (g2Model !== "dall-e-3") {
+    throw new Error(`FAIL: expected fresh auto-selection to choose dall-e-3, got ${g2Model}`);
   }
-  if (modelsCalls !== modelsBefore) {
-    throw new Error(`FAIL: remembered model should avoid re-querying /models, got ${modelsCalls} calls (before: ${modelsBefore})`);
+  if (modelsCalls !== modelsBefore + 1) {
+    throw new Error(`FAIL: omitted model should re-query /models exactly once, got ${modelsCalls - modelsBefore} calls`);
   }
-  console.log("remembered model reused:", g2Model, "(/models not re-queried) ✅");
+  console.log("explicit model was not persisted; next omitted model re-queried /models ✅");
 
   console.log("\nAll checks passed. ✅");
   mock.shutdown();

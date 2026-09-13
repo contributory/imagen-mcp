@@ -17,7 +17,7 @@ Each request to the MCP server can carry its own configuration:
 | API key | `X-OpenAI-Api-Key` | `apiKey` | ✅ |
 | Base URL | `X-OpenAI-Base-Url` | `baseUrl` | ❌ (defaults to `https://api.openai.com/v1`) |
 
-> 🤖 **Model does not need to be passed** — the server **remembers the last-used model** for each base URL (memory + blob storage on Val Town). On first use, it calls `GET {baseUrl}/models` to select a model (preferring image-generation models), and reuses the remembered model on subsequent calls. You can still override it using the `model` parameter of `generate_image`.
+> 🤖 **Model does not need to be passed** — when `model` is omitted, the server calls `GET {baseUrl}/models` for that request and selects an image-generation model. The server is stateless and does not persist models, images, credentials, or request data.
 
 API key can also be passed via the standard header: `Authorization: Bearer <apiKey>`.
 
@@ -45,7 +45,7 @@ curl -X POST "https://<username>-<valname>.web.val.run/?apiKey=sk-...&baseUrl=ht
 ## ✨ Features
 
 - **`generate_image`** — uses the official OpenAI JavaScript/TypeScript SDK (`client.images.generate`) against the configured `baseUrl` (DALL·E 3, GPT Image models, and OpenAI-compatible providers)
-  - Model **auto-selected & remembered** — first call selects from `GET /models` (preferring image-generation models), then remembers the last-used model for each base URL; no need to pass `model`, but you can still override it
+  - Model **auto-selected per request** from `GET /models` (preferring image-generation models) when `model` is omitted; nothing is persisted
   - Supports `prompt`, `size`, `n`, `quality`, `style`, `response_format`
   - `extra` parameter to pass any additional fields to the provider
   - Returns Markdown with images + `structuredContent` (url / base64) for programmatic agent use

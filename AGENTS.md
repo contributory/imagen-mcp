@@ -47,16 +47,13 @@ is the Val Town-injected `valtown` secret, used purely to detect the platform).
 
 ### Model resolution (generate_image)
 
-The model is NOT configured by the client. Resolution order:
+The server is stateless. Resolution order:
 1. Explicit `model` tool argument (optional override).
-2. Remembered last-used model for that base URL (in-memory `Map` + Val Town
-   blob `meta/last_models.json`, keyed by `baseUrl`).
-3. First call: `pickModel(baseUrl, apiKey)` → `GET {baseUrl}/models`, prefers
-   an image-capable id (`IMAGE_MODEL_HINTS`: gpt-image, dall-e, flux, sdxl,
-   stable-diffusion, imagen, ...), else the first id, else `DEFAULT_MODEL`
-   with a warning.
-The resolved model is stored via `rememberModel(baseUrl, model)`; blob writes
-only happen when the value actually changes.
+2. Otherwise `pickModel(baseUrl, apiKey)` calls `GET {baseUrl}/models` for that
+   request, preferring an image-capable id (`IMAGE_MODEL_HINTS`: gpt-image,
+   dall-e, flux, sdxl, stable-diffusion, imagen, ...), else the first id, else
+   `DEFAULT_MODEL` with a warning.
+No model selection, image, credential, or request data is persisted.
 
 ### Tools
 
@@ -66,12 +63,6 @@ only happen when the value actually changes.
   `extra?` (passthrough record merged into the body). Returns markdown (with
   images / data URIs) + `structuredContent { model, created, images[] }`.
 - `list_models` — calls `GET {baseUrl}/models`; returns `{ models: string[] }`.
-
-### Blob storage (Val Town only)
-
-Val Town blob storage is used only to persist `meta/last_models.json`, which
-remembers the last selected model per base URL across cold starts. Generated
-images are not persisted by this server.
 
 ### Local development (not Val Town)
 
@@ -83,7 +74,7 @@ images are not persisted by this server.
   tools are listed).
 - `deno task test:mock` → `scripts/test-mock-api.ts` (E2E against a local mock
   OpenAI API on 8788; verifies headers/query-param/Bearer config, model
-  auto-select + remember (only one `/models` query), `list_models`, and
+  auto-select per request and `list_models`,
   missing-key error).
 - `deno task check` / `deno lint` — keep clean before committing.
 

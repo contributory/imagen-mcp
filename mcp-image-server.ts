@@ -159,45 +159,6 @@ async function pickModel(baseUrl: string, apiKey: string): Promise<ModelPick> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Last-used model memory
-// ---------------------------------------------------------------------------
-
-const LAST_MODEL_BLOB_KEY = "meta/last_models.json";
-const lastModels = new Map<string, string>();
-let blobLastModelsLoaded = false;
-
-/** Return the remembered model for a base URL (in-memory, then Val Town blob). */
-async function getRememberedModel(baseUrl: string): Promise<string | undefined> {
-  if (!lastModels.has(baseUrl) && !blobLastModelsLoaded && Deno.env.get("valtown")) {
-    try {
-      const { blob } = await import("https://esm.town/v/std/blob/main.ts");
-      const data = await blob.getJSON(LAST_MODEL_BLOB_KEY) as Record<string, unknown> | undefined;
-      if (data && typeof data === "object") {
-        for (const [key, value] of Object.entries(data)) {
-          if (typeof value === "string") lastModels.set(key, value);
-        }
-      }
-    } catch {
-      // blob storage only exists on Val Town
-    }
-    blobLastModelsLoaded = true;
-  }
-  return lastModels.get(baseUrl);
-}
-
-/** Remember the model used for a base URL (in-memory + persist to Val Town blob). */
-async function rememberModel(baseUrl: string, model: string): Promise<void> {
-  lastModels.set(baseUrl, model);
-  if (!Deno.env.get("valtown")) return;
-  try {
-    const { blob } = await import("https://esm.town/v/std/blob/main.ts");
-    await blob.setJSON(LAST_MODEL_BLOB_KEY, Object.fromEntries(lastModels));
-  } catch {
-    // persistence failures are non-fatal
-  }
-}
-
 /**
  * Call POST {baseUrl}/images/generations with an OpenAI-compatible payload and
  * return an MCP tool result (markdown text + structuredContent).
@@ -215,22 +176,13 @@ async function generateImages(
     extra?: Record<string, unknown>;
   },
 ): Promise<{ content: { type: "text"; text: string }[]; structuredContent?: unknown; isError?: boolean }> {
-  // Model resolution: explicit arg → remembered last-used model → auto-select from /models.
-  // The resolved model is remembered per base URL so later calls don't need it again.
+  // Model resolution is stateless: explicit arg, otherwise auto-select from /models for this call.
   let model = args.model;
   let modelNote: string | undefined;
   if (!model) {
-    const remembered = await getRememberedModel(config.baseUrl);
-    if (remembered) {
-      model = remembered;
-    } else {
-      const picked = await pickModel(config.baseUrl, config.apiKey);
-      model = picked.model;
-      modelNote = picked.warning;
-    }
-  }
-  if (lastModels.get(config.baseUrl) !== model) {
-    await rememberModel(config.baseUrl, model);
+    const picked = await pickModel(config.baseUrl, config.apiKey);
+    model = picked.model;
+    modelNote = picked.warning;
   }
 
   const body: Record<string, unknown> = {
@@ -306,7 +258,7 @@ function buildServer(config: ServerConfig): McpServer {
         model: z
           .string()
           .optional()
-          .describe("Optional model override. When omitted, the last-used model for this base URL is reused, or auto-selected from GET /models on the first call."),
+          .describe("Optional model override. When omitted, the server auto-selects a model from GET /models for this request."),
         size: z
           .enum(["256x256", "512x512", "1024x1024", "1024x1792", "1792x1024", "auto"])
           .optional()

@@ -8,8 +8,6 @@
  */
 
 import { createServer } from "node:http";
-import { mkdir, readFile, writeFile as writeFileFs } from "node:fs/promises";
-import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -23,10 +21,6 @@ const SERVER_NAME = "imagen-mcp";
 const SERVER_VERSION = "2.2.0";
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MODEL = "dall-e-3";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, "data");
-const LAST_MODELS_FILE = join(DATA_DIR, "last_models.json");
 
 // ---- helpers ----
 function getHeader(req, name) {
@@ -68,39 +62,15 @@ async function pickModel(baseUrl, apiKey) {
   }
 }
 
-// ---- last model memory (file) ----
-const lastModels = new Map();
-let lastModelsLoaded = false;
-async function loadLastModels() {
-  if (lastModelsLoaded) return;
-  lastModelsLoaded = true;
-  try {
-    const raw = await readFile(LAST_MODELS_FILE, "utf-8");
-    const obj = JSON.parse(raw);
-    for (const [k, v] of Object.entries(obj)) if (typeof v === "string") lastModels.set(k, v);
-  } catch {}
-}
-async function getRememberedModel(baseUrl) { await loadLastModels(); return lastModels.get(baseUrl); }
-async function rememberModel(baseUrl, model) {
-  await loadLastModels();
-  lastModels.set(baseUrl, model);
-  try {
-    await mkdir(dirname(LAST_MODELS_FILE), { recursive: true });
-    await writeFileFs(LAST_MODELS_FILE, JSON.stringify(Object.fromEntries(lastModels), null, 2), "utf-8");
-  } catch {}
-}
-
-
 // ---- core ----
 async function generateImages(config, args) {
   let model = args.model;
   let modelNote;
   if (!model) {
-    const remembered = await getRememberedModel(config.baseUrl);
-    if (remembered) model = remembered;
-    else { const picked = await pickModel(config.baseUrl, config.apiKey); model = picked.model; modelNote = picked.warning; }
+    const picked = await pickModel(config.baseUrl, config.apiKey);
+    model = picked.model;
+    modelNote = picked.warning;
   }
-  if (lastModels.get(config.baseUrl) !== model) await rememberModel(config.baseUrl, model);
 
   const body = { model, prompt: args.prompt, n: args.n ?? 1, response_format: args.response_format ?? "url" };
   if (args.size && args.size !== "auto") body.size = args.size;
@@ -145,7 +115,7 @@ function buildServer(config) {
     description: "Generate images via OpenAI-compatible API. Config via headers X-OpenAI-Api-Key / X-OpenAI-Base-Url, query ?apiKey=&baseUrl=, or env OPENAI_API_KEY/OPENAI_BASE_URL.",
     inputSchema: z.object({
       prompt: z.string().describe("Detailed text description of the image(s) to generate."),
-      model: z.string().optional().describe("Optional model override. Omit to auto-select/remember per baseUrl."),
+      model: z.string().optional().describe("Optional model override. Omit to auto-select from GET /models for this request."),
       size: z.enum(["256x256","512x512","1024x1024","1024x1792","1792x1024","auto"]).optional(),
       n: z.number().int().min(1).max(10).optional(),
       quality: z.enum(["standard","hd"]).optional(),
