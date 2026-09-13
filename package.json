@@ -11,9 +11,11 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "openai": "^7.15.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0"
+    "@types/node": "^26.2.0",
+    "supabase": "2.117.0"
   }
 }

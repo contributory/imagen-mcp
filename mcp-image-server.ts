@@ -16,10 +16,10 @@
  *     X-OpenAI-Api-Key: <api key>                  (required)
  *     X-OpenAI-Base-Url: https://api.openai.com/v1 (optional)
  *   Alternative for the key:  Authorization: Bearer <api key>
- *   Or as URL query params:   ?api_key=...&base_url=...
+ *   Or as URL query params:   ?apiKey=...&baseUrl=...
  *
  *   The model is NOT configured by the client — it is auto-selected by calling
- *   GET {base_url}/models (preferring an image-capable model id). An optional
+ *   GET {baseUrl}/models (preferring an image-capable model id). An optional
  *   `model` argument on generate_image can still override it per call.
  *
  * DEPLOY ON VAL TOWN
@@ -35,6 +35,8 @@
 
 import { createMcpHandler, McpServer } from "npm:@modelcontextprotocol/server";
 import { z } from "npm:zod@4";
+import OpenAI from "npm:openai";
+import type { ImageGenerateParamsNonStreaming } from "npm:openai/resources/images";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -43,7 +45,7 @@ import { z } from "npm:zod@4";
 const SERVER_NAME = "imagen-mcp";
 const SERVER_VERSION = "2.2.0";
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
-// Last-resort fallback, only used if GET {base_url}/models cannot be reached.
+// Last-resort fallback, only used if GET {baseUrl}/models cannot be reached.
 const DEFAULT_MODEL = "dall-e-3";
 
 // ---------------------------------------------------------------------------
@@ -75,13 +77,13 @@ function extractConfig(req: Request): ServerConfig {
   const url = new URL(req.url);
   const headers = req.headers;
 
-  let apiKey = headerOrParam(headers, "x-openai-api-key", url.searchParams, "api_key");
+  let apiKey = headerOrParam(headers, "x-openai-api-key", url.searchParams, "apiKey");
   if (!apiKey) {
     const auth = headers.get("authorization") ?? "";
     if (auth.startsWith("Bearer ")) apiKey = auth.slice(7).trim();
   }
 
-  const baseUrl = headerOrParam(headers, "x-openai-base-url", url.searchParams, "base_url", DEFAULT_BASE_URL);
+  const baseUrl = headerOrParam(headers, "x-openai-base-url", url.searchParams, "baseUrl", DEFAULT_BASE_URL);
 
   return { apiKey, baseUrl: baseUrl.replace(/\/+$/, "") };
 }
@@ -111,7 +113,7 @@ async function saveImageToBlob(b64: string, model: string): Promise<string | nul
 }
 
 // ---------------------------------------------------------------------------
-// Model auto-selection via GET {base_url}/models
+// Model auto-selection via GET {baseUrl}/models
 // ---------------------------------------------------------------------------
 
 /** Substrings that hint a model id is image-capable. */
@@ -141,7 +143,7 @@ interface ModelPick {
 }
 
 /**
- * Pick a model by querying GET {base_url}/models. Prefers the first
+ * Pick a model by querying GET {baseUrl}/models. Prefers the first
  * image-capable id, otherwise the first model returned. Falls back to
  * DEFAULT_MODEL (with a warning) when /models cannot be reached.
  */
@@ -257,33 +259,22 @@ async function generateImages(
   if (args.style) body.style = args.style;
   if (args.extra && typeof args.extra === "object") Object.assign(body, args.extra);
 
-  const endpoint = `${config.baseUrl}/images/generations`;
-  let res: Response;
+  const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl });
+  let data: { created?: number; data?: GeneratedImage[] };
   try {
-    res = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-    });
+    data = await client.images.generate(body as unknown as ImageGenerateParamsNonStreaming);
   } catch (err) {
+    const status = err && typeof err === "object" && "status" in err
+      ? (err as { status?: unknown }).status
+      : undefined;
+    const detail = err instanceof Error ? err.message : String(err);
+    const label = typeof status === "number" ? `Image API error (HTTP ${status})` : "Image API error";
     return {
-      content: [{ type: "text", text: `Network error while calling ${endpoint}: ${String(err)}` }],
+      content: [{ type: "text", text: `${label}:\n${detail}` }],
       isError: true,
     };
   }
 
-  if (!res.ok) {
-    const detail = await res.text();
-    return {
-      content: [{ type: "text", text: `Image API error (HTTP ${res.status}):\n${detail}` }],
-      isError: true,
-    };
-  }
-
-  const data = (await res.json()) as { created?: number; data?: GeneratedImage[] };
   const images = Array.isArray(data.data) ? data.data : [];
 
   const markdownLines: string[] = [];
@@ -331,7 +322,7 @@ function buildServer(config: ServerConfig): McpServer {
     "generate_image",
     {
       description:
-        "Generate one or more images through an OpenAI-compatible image generation API (DALL·E 3, gpt-image-1, ...). Returns Markdown containing the images plus structured metadata (urls / base64). The API key and base URL come from the request headers (X-OpenAI-Api-Key, X-OpenAI-Base-Url) or query params (api_key, base_url).",
+        "Generate one or more images through an OpenAI-compatible image generation API (DALL·E 3, gpt-image-1, ...). Returns Markdown containing the images plus structured metadata (urls / base64). The API key and base URL come from the request headers (X-OpenAI-Api-Key, X-OpenAI-Base-Url) or query params (apiKey, baseUrl).",
       inputSchema: z.object({
         prompt: z.string().describe("Detailed text description of the image(s) to generate."),
         model: z
@@ -364,7 +355,7 @@ function buildServer(config: ServerConfig): McpServer {
         return {
           content: [{
             type: "text",
-            text: "No API key provided. Pass it via the `X-OpenAI-Api-Key` header, `Authorization: Bearer <key>`, or the `api_key` query parameter.",
+            text: "No API key provided. Pass it via the `X-OpenAI-Api-Key` header, `Authorization: Bearer <key>`, or the `apiKey` query parameter.",
           }],
           isError: true,
         };
@@ -384,7 +375,7 @@ function buildServer(config: ServerConfig): McpServer {
         return {
           content: [{
             type: "text",
-            text: "No API key provided. Pass it via the `X-OpenAI-Api-Key` header, `Authorization: Bearer <key>`, or the `api_key` query parameter.",
+            text: "No API key provided. Pass it via the `X-OpenAI-Api-Key` header, `Authorization: Bearer <key>`, or the `apiKey` query parameter.",
           }],
           isError: true,
         };

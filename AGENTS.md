@@ -35,15 +35,15 @@ is the Val Town-injected `valtown` secret, used purely to detect the platform).
 
 | Setting | Header | Query param |
 |---|---|---|
-| API key (required) | `X-OpenAI-Api-Key` or `Authorization: Bearer <key>` | `api_key` |
-| Base URL (optional) | `X-OpenAI-Base-Url` | `base_url` |
+| API key (required) | `X-OpenAI-Api-Key` or `Authorization: Bearer <key>` | `apiKey` |
+| Base URL (optional) | `X-OpenAI-Base-Url` | `baseUrl` |
 
 - `extractConfig(req)` → `ServerConfig { apiKey, baseUrl }` (trailing slashes
   stripped from `baseUrl`).
 - `headerOrParam(headers, headerName, params, paramName, fallback)` reads a
   header first, then falls back to a URL query param.
 - Missing API key → `generate_image`/`list_models` return a helpful error
-  telling the client to pass the key via header, Bearer, or `api_key` param.
+  telling the client to pass the key via header, Bearer, or `apiKey` param.
 
 ### Model resolution (generate_image)
 
@@ -51,7 +51,7 @@ The model is NOT configured by the client. Resolution order:
 1. Explicit `model` tool argument (optional override).
 2. Remembered last-used model for that base URL (in-memory `Map` + Val Town
    blob `meta/last_models.json`, keyed by `baseUrl`).
-3. First call: `pickModel(baseUrl, apiKey)` → `GET {base_url}/models`, prefers
+3. First call: `pickModel(baseUrl, apiKey)` → `GET {baseUrl}/models`, prefers
    an image-capable id (`IMAGE_MODEL_HINTS`: gpt-image, dall-e, flux, sdxl,
    stable-diffusion, imagen, ...), else the first id, else `DEFAULT_MODEL`
    with a warning.
@@ -60,12 +60,12 @@ only happen when the value actually changes.
 
 ### Tools
 
-- `generate_image` — calls `POST {base_url}/images/generations`. Args: `prompt`
+- `generate_image` — calls `POST {baseUrl}/images/generations`. Args: `prompt`
   (required), `model?`, `size?` (enum), `n?` (1–10), `quality?`, `style?`,
   `response_format?` (`url`|`b64_json`), `save_to_blob?` (bool), `extra?`
   (passthrough record merged into the body). Returns markdown (with images /
   data URIs) + `structuredContent { model, created, images[] }`.
-- `list_models` — calls `GET {base_url}/models`; returns `{ models: string[] }`.
+- `list_models` — calls `GET {baseUrl}/models`; returns `{ models: string[] }`.
 - `list_images` — lists images persisted to Val Town blob storage
   (prefix `images/<model>/...`) via `blob.list`. Args: `model?`, `limit?`.
   Only works on Val Town (detected via `Deno.env.get("valtown")`); elsewhere

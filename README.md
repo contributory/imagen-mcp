@@ -14,12 +14,12 @@ Each request to the MCP server can carry its own configuration:
 
 | Information | Header | Query param | Required |
 |---|---|---|---|
-| API key | `X-OpenAI-Api-Key` | `api_key` | ✅ |
-| Base URL | `X-OpenAI-Base-Url` | `base_url` | ❌ (defaults to `https://api.openai.com/v1`) |
+| API key | `X-OpenAI-Api-Key` | `apiKey` | ✅ |
+| Base URL | `X-OpenAI-Base-Url` | `baseUrl` | ❌ (defaults to `https://api.openai.com/v1`) |
 
-> 🤖 **Model does not need to be passed** — the server **remembers the last-used model** for each base URL (memory + blob storage on Val Town). On first use, it calls `GET {base_url}/models` to select a model (preferring image-generation models), and reuses the remembered model on subsequent calls. You can still override it using the `model` parameter of `generate_image`.
+> 🤖 **Model does not need to be passed** — the server **remembers the last-used model** for each base URL (memory + blob storage on Val Town). On first use, it calls `GET {baseUrl}/models` to select a model (preferring image-generation models), and reuses the remembered model on subsequent calls. You can still override it using the `model` parameter of `generate_image`.
 
-API key can also be passed via the standard header: `Authorization: Bearer <api_key>`.
+API key can also be passed via the standard header: `Authorization: Bearer <apiKey>`.
 
 **Example with curl (via header):**
 
@@ -35,7 +35,7 @@ curl -X POST https://<username>-<valname>.web.val.run/ \
 **Or via query param:**
 
 ```bash
-curl -X POST "https://<username>-<valname>.web.val.run/?api_key=sk-...&base_url=https%3A%2F%2Fapi.openai.com%2Fv1" \
+curl -X POST "https://<username>-<valname>.web.val.run/?apiKey=sk-...&baseUrl=https%3A%2F%2Fapi.openai.com%2Fv1" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
@@ -44,7 +44,7 @@ curl -X POST "https://<username>-<valname>.web.val.run/?api_key=sk-...&base_url=
 
 ## ✨ Features
 
-- **`generate_image`** — calls `POST {base_url}/images/generations` (DALL·E 3, gpt-image-1, Groq, Together, OpenRouter, vLLM/LiteLLM local, ...)
+- **`generate_image`** — uses the official OpenAI JavaScript/TypeScript SDK (`client.images.generate`) against the configured `baseUrl` (DALL·E 3, GPT Image models, and OpenAI-compatible providers)
   - Model **auto-selected & remembered** — first call selects from `GET /models` (preferring image-generation models), then remembers the last-used model for each base URL; no need to pass `model`, but you can still override it
   - Supports `prompt`, `size`, `n`, `quality`, `style`, `response_format`
   - `extra` parameter to pass any additional fields to the provider
@@ -91,6 +91,43 @@ imagen-mcp/
 npx valtown val create --http <username>/imagen-mcp
 # then paste the content of mcp-image-server.ts and deploy
 ```
+
+---
+
+## ☁️ Deploy to Supabase Edge Functions
+
+A public Supabase Edge Function entrypoint is included at `supabase/functions/imagen-mcp/index.ts`. The function is configured with `verify_jwt = false`, so Supabase does not require a Supabase JWT before the MCP request reaches the server. The OpenAI-compatible credentials are still supplied per request through the existing `X-OpenAI-Api-Key` / `X-OpenAI-Base-Url` headers or `apiKey` / `baseUrl` query parameters.
+
+```bash
+supabase login
+supabase link --project-ref <your-project-ref>
+supabase functions deploy imagen-mcp
+```
+
+After deployment, use:
+
+```text
+https://<your-project-ref>.supabase.co/functions/v1/imagen-mcp
+```
+
+Example query-param form:
+
+```text
+https://<your-project-ref>.supabase.co/functions/v1/imagen-mcp?apiKey=sk-...&baseUrl=https%3A%2F%2Fapi.openai.com%2Fv1
+```
+
+> `verify_jwt = false` makes the Edge Function itself public. Do not hard-code provider API keys in the function; send them per request as described above.
+
+### CircleCI auto-deploy
+
+The repository includes `.circleci/config.yml`. Pushes to `main` automatically deploy the `imagen-mcp` Edge Function through the pinned Supabase CLI using API-based bundling, so Docker is not required in CircleCI.
+
+Configure these environment variables in the CircleCI project settings:
+
+- `SUPABASE_ACCESS_TOKEN` — Supabase personal access token used by the CLI.
+- `SUPABASE_PROJECT_REF` — the target Supabase project ref.
+
+The deploy command keeps the function public with `--no-verify-jwt`, matching `supabase/config.toml`.
 
 ---
 
@@ -197,6 +234,7 @@ Generated 1 image(s) with model **dall-e-3**.
 
 ## 🧰 Technologies
 
+- [OpenAI JavaScript/TypeScript SDK](https://github.com/openai/openai-node) — official client used for image generation
 - [Model Context Protocol TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) — `@modelcontextprotocol/server` (v2)
 - [zod v4](https://zod.dev) — schema for tool
 - [Val Town](https://val.town) — Deno serverless platform

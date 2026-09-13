@@ -104,7 +104,7 @@ async function main() {
   console.log("structuredContent:", JSON.stringify(structured));
 
   console.log("\n=== B. generate_image via URL query params ===");
-  const qs = `?api_key=test-key-123&base_url=${encodeURIComponent("http://127.0.0.1:8788/v1")}`;
+  const qs = `?apiKey=test-key-123&baseUrl=${encodeURIComponent("http://127.0.0.1:8788/v1")}`;
   const callQs = await post(BASE + qs, rpc(2, "tools/call", {
     name: "generate_image",
     arguments: { prompt: "a cute corgi astronaut" },

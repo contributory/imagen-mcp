@@ -1,0 +1,6 @@
+project_id = "imagen-mcp"
+
+[functions.imagen-mcp]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/imagen-mcp/index.ts"

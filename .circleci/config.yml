@@ -1,0 +1,51 @@
+version: 2.1
+
+jobs:
+  deploy-supabase:
+    docker:
+      - image: cimg/node:24.21.0
+    resource_class: small
+    steps:
+      - checkout
+
+      - restore_cache:
+          keys:
+            - npm-v1-{{ checksum "package-lock.json" }}
+            - npm-v1-
+
+      - run:
+          name: Install dependencies
+          command: npm ci
+
+      - save_cache:
+          key: npm-v1-{{ checksum "package-lock.json" }}
+          paths:
+            - ~/.npm
+
+      - run:
+          name: Check Supabase deployment variables
+          command: |
+            if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+              echo "SUPABASE_ACCESS_TOKEN is not configured in CircleCI."
+              exit 1
+            fi
+            if [ -z "${SUPABASE_PROJECT_REF:-}" ]; then
+              echo "SUPABASE_PROJECT_REF is not configured in CircleCI."
+              exit 1
+            fi
+
+      - run:
+          name: Deploy imagen-mcp to Supabase Edge Functions
+          command: |
+            npx supabase functions deploy imagen-mcp \
+              --project-ref "$SUPABASE_PROJECT_REF" \
+              --use-api \
+              --no-verify-jwt
+
+workflows:
+  deploy:
+    jobs:
+      - deploy-supabase:
+          filters:
+            branches:
+              only: main

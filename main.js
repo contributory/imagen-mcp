@@ -17,6 +17,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import OpenAI from "openai";
 
 // ---- config ----
 const SERVER_NAME = "imagen-mcp";
@@ -40,14 +41,14 @@ function extractConfig(req) {
   const host = getHeader(req, "host") || "localhost";
   const url = new URL(req.url ?? "/", `http://${host}`);
 
-  let apiKey = getHeader(req, "x-openai-api-key") || url.searchParams.get("api_key") || "";
+  let apiKey = getHeader(req, "x-openai-api-key") || url.searchParams.get("apiKey") || "";
   if (!apiKey) {
     const auth = getHeader(req, "authorization");
     if (auth.startsWith("Bearer ")) apiKey = auth.slice(7).trim();
   }
   if (!apiKey) apiKey = process.env.OPENAI_API_KEY ?? process.env.X_OPENAI_API_KEY ?? "";
 
-  let baseUrl = getHeader(req, "x-openai-base-url") || url.searchParams.get("base_url") || process.env.OPENAI_BASE_URL || DEFAULT_BASE_URL;
+  let baseUrl = getHeader(req, "x-openai-base-url") || url.searchParams.get("baseUrl") || process.env.OPENAI_BASE_URL || DEFAULT_BASE_URL;
 
   return { apiKey: String(apiKey).trim(), baseUrl: String(baseUrl).trim().replace(/\/+$/, "") };
 }
@@ -120,16 +121,17 @@ async function generateImages(config, args) {
   if (args.style) body.style = args.style;
   if (args.extra && typeof args.extra === "object") Object.assign(body, args.extra);
 
-  const endpoint = `${config.baseUrl}/images/generations`;
-  let res;
+  const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl });
+  let data;
   try {
-    res = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify(body) });
+    data = await client.images.generate(body);
   } catch (err) {
-    return { content: [{ type: "text", text: `Network error while calling ${endpoint}: ${String(err)}` }], isError: true };
+    const status = err && typeof err === "object" && "status" in err ? err.status : undefined;
+    const detail = err instanceof Error ? err.message : String(err);
+    const label = typeof status === "number" ? `Image API error (HTTP ${status})` : "Image API error";
+    return { content: [{ type: "text", text: `${label}:\n${detail}` }], isError: true };
   }
-  if (!res.ok) return { content: [{ type: "text", text: `Image API error (HTTP ${res.status}):\n${await res.text()}` }], isError: true };
 
-  const data = await res.json();
   const images = Array.isArray(data.data) ? data.data : [];
   const markdownLines = [];
   if (modelNote) markdownLines.push(`> ${modelNote}`);
@@ -154,7 +156,7 @@ function buildServer(config) {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   server.registerTool("generate_image", {
-    description: "Generate images via OpenAI-compatible API. Config via headers X-OpenAI-Api-Key / X-OpenAI-Base-Url, query ?api_key=&base_url=, or env OPENAI_API_KEY/OPENAI_BASE_URL.",
+    description: "Generate images via OpenAI-compatible API. Config via headers X-OpenAI-Api-Key / X-OpenAI-Base-Url, query ?apiKey=&baseUrl=, or env OPENAI_API_KEY/OPENAI_BASE_URL.",
     inputSchema: z.object({
       prompt: z.string().describe("Detailed text description of the image(s) to generate."),
       model: z.string().optional().describe("Optional model override. Omit to auto-select/remember per baseUrl."),
@@ -167,15 +169,15 @@ function buildServer(config) {
       extra: z.record(z.string(), z.unknown()).optional(),
     }),
   }, async (args) => {
-    if (!config.apiKey) return { content: [{ type: "text", text: "No API key. Pass X-OpenAI-Api-Key / Authorization: Bearer <key> / ?api_key=..., or set OPENAI_API_KEY." }], isError: true };
+    if (!config.apiKey) return { content: [{ type: "text", text: "No API key. Pass X-OpenAI-Api-Key / Authorization: Bearer <key> / ?apiKey=..., or set OPENAI_API_KEY." }], isError: true };
     return await generateImages(config, args);
   });
 
   server.registerTool("list_models", {
-    description: "List models from GET {base_url}/models.",
+    description: "List models from GET {baseUrl}/models.",
     inputSchema: z.object({}),
   }, async () => {
-    if (!config.apiKey) return { content: [{ type: "text", text: "No API key. Pass X-OpenAI-Api-Key / Authorization: Bearer <key> / ?api_key=..., or set OPENAI_API_KEY." }], isError: true };
+    if (!config.apiKey) return { content: [{ type: "text", text: "No API key. Pass X-OpenAI-Api-Key / Authorization: Bearer <key> / ?apiKey=..., or set OPENAI_API_KEY." }], isError: true };
     const res = await fetch(`${config.baseUrl}/models`, { headers: { Authorization: `Bearer ${config.apiKey}` } });
     if (!res.ok) return { content: [{ type: "text", text: `Models API error (HTTP ${res.status}): ${await res.text()}` }], isError: true };
     const data = await res.json();
@@ -251,7 +253,7 @@ function startHttp() {
       const accept = getHeader(req, "accept");
       if (!accept.includes("text/event-stream") && !accept.includes("application/json")) {
         res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-        res.end(SERVER_NAME + " v" + SERVER_VERSION + "\nMCP Streamable HTTP: POST http://" + host + ":" + port + "/mcp\nHealth: GET http://" + host + ":" + port + "/health\nPass API key via X-OpenAI-Api-Key / Authorization: Bearer <key> / ?api_key= or OPENAI_API_KEY env.\n");
+        res.end(SERVER_NAME + " v" + SERVER_VERSION + "\nMCP Streamable HTTP: POST http://" + host + ":" + port + "/mcp\nHealth: GET http://" + host + ":" + port + "/health\nPass API key via X-OpenAI-Api-Key / Authorization: Bearer <key> / ?apiKey= or OPENAI_API_KEY env.\n");
         return;
       }
     }
@@ -273,7 +275,7 @@ function startHttp() {
   httpServer.listen(port, host, () => {
     console.log(`[${SERVER_NAME} v${SERVER_VERSION}] HTTP listening on http://${host}:${port}/mcp`);
     console.log(`  Health: http://${host}:${port}/health`);
-    console.log(`  Pass key per-request: X-OpenAI-Api-Key / Authorization: Bearer <key> / ?api_key=`);
+    console.log(`  Pass key per-request: X-OpenAI-Api-Key / Authorization: Bearer <key> / ?apiKey=`);
     console.log(`  Images saved to: ${IMAGES_DIR}`);
   });
 }
