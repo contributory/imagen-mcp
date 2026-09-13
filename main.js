@@ -8,9 +8,8 @@
  */
 
 import { createServer } from "node:http";
-import { mkdir, readdir, readFile, stat, writeFile as writeFileFs } from "node:fs/promises";
+import { mkdir, readFile, writeFile as writeFileFs } from "node:fs/promises";
 import { join, dirname } from "node:path";
-import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -27,7 +26,6 @@ const DEFAULT_MODEL = "dall-e-3";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, "data");
-const IMAGES_DIR = join(DATA_DIR, "images");
 const LAST_MODELS_FILE = join(DATA_DIR, "last_models.json");
 
 // ---- helpers ----
@@ -92,17 +90,6 @@ async function rememberModel(baseUrl, model) {
   } catch {}
 }
 
-// ---- save image ----
-async function saveImageToFile(b64, model) {
-  try {
-    const dir = join(IMAGES_DIR, model);
-    await mkdir(dir, { recursive: true });
-    const filename = `${Date.now()}-${randomUUID().slice(0,8)}.png`;
-    const filePath = join(dir, filename);
-    await writeFileFs(filePath, Buffer.from(b64, "base64"));
-    return `images/${model}/${filename}`;
-  } catch { return null; }
-}
 
 // ---- core ----
 async function generateImages(config, args) {
@@ -115,7 +102,7 @@ async function generateImages(config, args) {
   }
   if (lastModels.get(config.baseUrl) !== model) await rememberModel(config.baseUrl, model);
 
-  const body = { model, prompt: args.prompt, n: args.n ?? 1, response_format: args.save_to_blob ? "b64_json" : (args.response_format ?? "url") };
+  const body = { model, prompt: args.prompt, n: args.n ?? 1, response_format: args.response_format ?? "url" };
   if (args.size && args.size !== "auto") body.size = args.size;
   if (args.quality) body.quality = args.quality;
   if (args.style) body.style = args.style;
@@ -144,7 +131,6 @@ async function generateImages(config, args) {
     else if (typeof img.b64_json === "string" && img.b64_json) {
       entry.b64_json = img.b64_json;
       markdownLines.push(`![Generated image ${i+1}](data:image/png;base64,${img.b64_json})`);
-      if (args.save_to_blob) { const key = await saveImageToFile(img.b64_json, model); if (key) { entry.file = key; markdownLines.push(`Saved to \`${key}\``); } }
     } else entry.raw = img;
     structuredImages.push(entry);
   }
@@ -165,7 +151,6 @@ function buildServer(config) {
       quality: z.enum(["standard","hd"]).optional(),
       style: z.enum(["vivid","natural"]).optional(),
       response_format: z.enum(["url","b64_json"]).optional(),
-      save_to_blob: z.boolean().optional().describe("When true, forces b64_json and saves to ./data/images/<model>/"),
       extra: z.record(z.string(), z.unknown()).optional(),
     }),
   }, async (args) => {
@@ -183,42 +168,6 @@ function buildServer(config) {
     const data = await res.json();
     const models = (data.data ?? []).map(m => m.id).filter(Boolean);
     return { content: [{ type: "text", text: models.length ? `Available models (${models.length}):\n${models.join("\n")}` : "No models returned." }], structuredContent: { models } };
-  });
-
-  server.registerTool("list_images", {
-    description: "List images previously saved with save_to_blob:true (stored in ./data/images/<model>/).",
-    inputSchema: z.object({
-      model: z.string().optional().describe("Filter by model, e.g. 'dall-e-3'."),
-      limit: z.number().int().min(1).max(100).optional().describe("Max to return, newest first. Default 20."),
-    }),
-  }, async (args) => {
-    const prefixDir = args.model ? join(IMAGES_DIR, args.model) : IMAGES_DIR;
-    try { await mkdir(prefixDir, { recursive: true }); } catch {}
-    let files = [];
-    try {
-      if (args.model) {
-        const entries = await readdir(prefixDir).catch(() => []);
-        for (const f of entries) {
-          const full = join(prefixDir, f);
-          try { const s = await stat(full); if (s.isFile()) files.push({ key: `images/${args.model}/${f}`, size: s.size, updatedAt: s.mtime.toISOString() }); } catch {}
-        }
-      } else {
-        const models = await readdir(IMAGES_DIR).catch(() => []);
-        for (const m of models) {
-          const mDir = join(IMAGES_DIR, m);
-          let entries = [];
-          try { const s = await stat(mDir); if (!s.isDirectory()) continue; entries = await readdir(mDir); } catch { continue; }
-          for (const f of entries) {
-            const full = join(mDir, f);
-            try { const s = await stat(full); if (s.isFile()) files.push({ key: `images/${m}/${f}`, size: s.size, updatedAt: s.mtime.toISOString() }); } catch {}
-          }
-        }
-      }
-    } catch (err) { return { content: [{ type: "text", text: `Cannot list images: ${String(err)}` }], isError: true }; }
-    files.sort((a,b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
-    const shown = files.slice(0, args.limit ?? 20);
-    const text = shown.length ? `Images in ./data (${shown.length}/${files.length}):\n${shown.map(i => `- ${i.key} (${i.size ?? "?"} bytes)`).join("\n")}` : "No images saved yet. Use generate_image with save_to_blob:true.";
-    return { content: [{ type: "text", text }], structuredContent: { total: files.length, images: shown } };
   });
 
   return server;
@@ -276,7 +225,6 @@ function startHttp() {
     console.log(`[${SERVER_NAME} v${SERVER_VERSION}] HTTP listening on http://${host}:${port}/mcp`);
     console.log(`  Health: http://${host}:${port}/health`);
     console.log(`  Pass key per-request: X-OpenAI-Api-Key / Authorization: Bearer <key> / ?apiKey=`);
-    console.log(`  Images saved to: ${IMAGES_DIR}`);
   });
 }
 

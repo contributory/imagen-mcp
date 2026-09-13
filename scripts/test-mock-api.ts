@@ -12,7 +12,6 @@
  *   - generate_image via Authorization: Bearer
  *   - list_models via headers
  *   - missing API key -> helpful error
- *   - list_images -> blob-storage message (only on Val Town)
  *   - remembered model reused (no re-query of /models)
  */
 
@@ -154,17 +153,7 @@ async function main() {
     throw new Error("FAIL: expected 'No API key provided' error");
   }
 
-  console.log("\n=== F. list_images (blob storage — only on Val Town) ===");
-  const listImgs = await post(BASE, rpc(6, "tools/call", { name: "list_images", arguments: {} }));
-  console.log(`status: ${listImgs.status}`);
-  const listImgsResult = resultOf(listImgs.text) as RpcResult;
-  const listImgsText = listImgsResult?.result?.content?.[0]?.text ?? "";
-  console.log("message:", JSON.stringify(listImgsText.slice(0, 160)));
-  if (!/Val Town/i.test(listImgsText)) {
-    throw new Error(`FAIL: expected a message about Val Town blob storage, got ${listImgsText}`);
-  }
-
-  console.log("\n=== G. remember last-used model ===");
+  console.log("\n=== F. remember last-used model ===");
   // Explicitly set a different model, then call again without `model` → it must reuse the remembered one.
   const modelsBefore = modelsCalls;
   const g1 = await post(BASE, rpc(7, "tools/call", {

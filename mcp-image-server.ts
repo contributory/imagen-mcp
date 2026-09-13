@@ -97,20 +97,6 @@ interface GeneratedImage {
   b64_json?: string;
 }
 
-/** Persist a base64 image into Val Town scoped blob storage. Returns the key. */
-async function saveImageToBlob(b64: string, model: string): Promise<string | null> {
-  try {
-    // This module only exists on Val Town; when unavailable the whole block is skipped.
-    const { blob } = await import("https://esm.town/v/std/blob/main.ts");
-    const binary = atob(b64);
-    const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-    const key = `images/${model}/${Date.now()}-${crypto.randomUUID().slice(0, 8)}.png`;
-    await blob.set(key, bytes);
-    return key;
-  } catch {
-    return null; // blob storage only exists on Val Town
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Model auto-selection via GET {baseUrl}/models
@@ -226,7 +212,6 @@ async function generateImages(
     quality?: string;
     style?: string;
     response_format?: "url" | "b64_json";
-    save_to_blob?: boolean;
     extra?: Record<string, unknown>;
   },
 ): Promise<{ content: { type: "text"; text: string }[]; structuredContent?: unknown; isError?: boolean }> {
@@ -252,7 +237,7 @@ async function generateImages(
     model,
     prompt: args.prompt,
     n: args.n ?? 1,
-    response_format: args.save_to_blob ? "b64_json" : (args.response_format ?? "url"),
+    response_format: args.response_format ?? "url",
   };
   if (args.size && args.size !== "auto") body.size = args.size;
   if (args.quality) body.quality = args.quality;
@@ -291,13 +276,6 @@ async function generateImages(
     } else if (typeof img.b64_json === "string" && img.b64_json) {
       entry.b64_json = img.b64_json;
       markdownLines.push(`![Generated image ${i + 1}](data:image/png;base64,${img.b64_json})`);
-      if (args.save_to_blob) {
-        const key = await saveImageToBlob(img.b64_json, model);
-        if (key) {
-          entry.blob_key = key;
-          markdownLines.push(`Persisted to Val Town blob storage with key: \`${key}\``);
-        }
-      }
     } else {
       entry.raw = img;
     }
@@ -340,10 +318,6 @@ function buildServer(config: ServerConfig): McpServer {
           .enum(["url", "b64_json"])
           .optional()
           .describe("Return 'url' (default) for a shareable link, or 'b64_json' for inline base64 data."),
-        save_to_blob: z
-          .boolean()
-          .optional()
-          .describe("When true, forces b64_json and persists the image to Val Town blob storage (only on Val Town)."),
         extra: z
           .record(z.string(), z.unknown())
           .optional()
@@ -402,71 +376,6 @@ function buildServer(config: ServerConfig): McpServer {
     },
   );
 
-  server.registerTool(
-    "list_images",
-    {
-      description:
-        "List images that were previously generated with `save_to_blob: true` and persisted to this val's Val Town blob storage (images/<model>/...). Only works when deployed on Val Town.",
-      inputSchema: z.object({
-        model: z.string().optional().describe("Only list images for this model id, e.g. 'dall-e-3'."),
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(100)
-          .optional()
-          .describe("Maximum number of images to return, newest first. Defaults to 20."),
-      }),
-    },
-    async (args) => {
-      // The 'valtown' secret is injected automatically by Val Town — no user configuration needed.
-      if (!Deno.env.get("valtown")) {
-        return {
-          content: [{
-            type: "text",
-            text: "Blob storage is only available when deployed on Val Town. Images generated with `save_to_blob: true` are listed here.",
-          }],
-        };
-      }
-      try {
-        const { blob } = await import("https://esm.town/v/std/blob/main.ts");
-        const prefix = args.model ? `images/${args.model}/` : "images/";
-        const listed = await blob.list(prefix);
-
-        // Normalise the response shape: the API may return string[] or { keys: [...] }.
-        let rawKeys: { key: string; size?: number; updatedAt?: string }[];
-        if (Array.isArray(listed)) {
-          rawKeys = listed.map((k) => (typeof k === "string" ? { key: k } : k));
-        } else if (Array.isArray((listed as { keys?: unknown[] }).keys)) {
-          rawKeys = (listed as { keys: { key: string; size?: number; updatedAt?: string }[] }).keys;
-        } else {
-          rawKeys = [];
-        }
-
-        const images = rawKeys
-          .map((k) => ({
-            key: k.key,
-            ...(k.size !== undefined ? { size: k.size } : {}),
-            ...(k.updatedAt ? { updatedAt: k.updatedAt } : {}),
-          }))
-          .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
-
-        const shown = images.slice(0, args.limit ?? 20);
-        const text = shown.length
-          ? `Images in blob storage (showing ${shown.length} of ${images.length}):\n${shown.map((i) => `- ${i.key}`).join("\n")}`
-          : "No images found in blob storage yet.";
-        return {
-          content: [{ type: "text", text }],
-          structuredContent: { total: images.length, images: shown },
-        };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `Cannot list images: ${String(err)}` }],
-          isError: true,
-        };
-      }
-    },
-  );
 
   return server;
 }

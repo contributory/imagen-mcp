@@ -48,10 +48,8 @@ curl -X POST "https://<username>-<valname>.web.val.run/?apiKey=sk-...&baseUrl=ht
   - Model **auto-selected & remembered** — first call selects from `GET /models` (preferring image-generation models), then remembers the last-used model for each base URL; no need to pass `model`, but you can still override it
   - Supports `prompt`, `size`, `n`, `quality`, `style`, `response_format`
   - `extra` parameter to pass any additional fields to the provider
-  - `save_to_blob: true` to save images to Val Town blob storage
   - Returns Markdown with images + `structuredContent` (url / base64) for programmatic agent use
 - **`list_models`** — lists available models from `GET /models`
-- **`list_images`** — lists images previously generated and saved to blob storage (`images/<model>/...`) on Val Town
 - No env vars required — configuration per request (multi-tenant, each user uses their own key)
 - Runs safely serverless: each request creates a new `McpServer` instance (per-request factory)
 
@@ -219,14 +217,13 @@ Generated 1 image(s) with model **dall-e-3**.
 | vLLM / LiteLLM | `http://localhost:8000/v1` | running locally |
 | Ollama | `http://localhost:11434/v1` | (depends on model) |
 
-> 💡 Some providers/models only return `b64_json` (no `url` support). In that case, pass `response_format: "b64_json"` — the server returns the image as a data URI; add `save_to_blob: true` to save to Val Town's blob storage.
+> 💡 Some providers/models only return `b64_json` (no `url` support). In that case, pass `response_format: "b64_json"` — the server returns the image as a data URI.
 
 ---
 
 ## ⚠️ Notes
 
 - **Val Town = serverless**: do not rely on module-scope state between requests. `createMcpHandler` uses a per-request factory, so it's safe.
-- **Images stored in blob storage** on Val Town (when passing `save_to_blob: true`) can only be viewed via blob admin in the sidebar, the `list_images` tool, or by reading with `blob.get()` — they are not public URLs.
 - **API key via query param** may leak in logs/history; prefer using **headers**.
 - **Image generation time** can be slow (10–60s) depending on the provider; some MCP clients may need increased HTTP timeout.
 

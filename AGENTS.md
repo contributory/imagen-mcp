@@ -60,24 +60,18 @@ only happen when the value actually changes.
 
 ### Tools
 
-- `generate_image` — calls `POST {baseUrl}/images/generations`. Args: `prompt`
-  (required), `model?`, `size?` (enum), `n?` (1–10), `quality?`, `style?`,
-  `response_format?` (`url`|`b64_json`), `save_to_blob?` (bool), `extra?`
-  (passthrough record merged into the body). Returns markdown (with images /
-  data URIs) + `structuredContent { model, created, images[] }`.
+- `generate_image` — calls `POST {baseUrl}/images/generations` through the
+  official OpenAI SDK. Args: `prompt` (required), `model?`, `size?` (enum),
+  `n?` (1–10), `quality?`, `style?`, `response_format?` (`url`|`b64_json`),
+  `extra?` (passthrough record merged into the body). Returns markdown (with
+  images / data URIs) + `structuredContent { model, created, images[] }`.
 - `list_models` — calls `GET {baseUrl}/models`; returns `{ models: string[] }`.
-- `list_images` — lists images persisted to Val Town blob storage
-  (prefix `images/<model>/...`) via `blob.list`. Args: `model?`, `limit?`.
-  Only works on Val Town (detected via `Deno.env.get("valtown")`); elsewhere
-  returns an explanatory message. Returns `{ total, images[] }`.
 
 ### Blob storage (Val Town only)
 
-Dynamically imports `https://esm.town/v/std/blob/main.ts` inside try/catch (the
-module doesn't exist off Val Town). `saveImageToBlob(b64, model)` persists
-`images/<model>/<ts>-<uuid>.png`; `list_images` reads them with
-`blob.list(prefix)`. No public URLs — images are served via this val or read
-with `blob.get()`.
+Val Town blob storage is used only to persist `meta/last_models.json`, which
+remembers the last selected model per base URL across cold starts. Generated
+images are not persisted by this server.
 
 ### Local development (not Val Town)
 
@@ -85,12 +79,12 @@ with `blob.get()`.
   `Deno.serve` on `127.0.0.1:8789`; Deno.serve logs a harmless legacy-abort
   warning). The `{ fetch }`-style object export is used ONLY in this wrapper.
 - `deno task test` → `scripts/test-local.ts` (JSON-RPC smoke: initialize →
-  tools/list → tools/call without a key → helpful error; asserts the three
+  tools/list → tools/call without a key → helpful error; asserts the two
   tools are listed).
 - `deno task test:mock` → `scripts/test-mock-api.ts` (E2E against a local mock
   OpenAI API on 8788; verifies headers/query-param/Bearer config, model
-  auto-select + remember (only one `/models` query), `list_models`,
-  `list_images`, missing-key error).
+  auto-select + remember (only one `/models` query), `list_models`, and
+  missing-key error).
 - `deno task check` / `deno lint` — keep clean before committing.
 
 ### Gotchas
