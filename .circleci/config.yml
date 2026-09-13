@@ -36,6 +36,7 @@ jobs:
           name: Link Supabase project
           command: |
             npx supabase link \
+              --yes \
               --project-ref "$SUPABASE_PROJECT_REF" \
               --password "$SUPABASE_DB_PASSWORD"
 
@@ -43,6 +44,7 @@ jobs:
           name: Apply database migrations
           command: |
             npx supabase db push \
+              --yes \
               --linked \
               --password "$SUPABASE_DB_PASSWORD"
 
@@ -50,6 +52,7 @@ jobs:
           name: Deploy image worker
           command: |
             npx supabase functions deploy imagen-mcp-worker \
+              --yes \
               --project-ref "$SUPABASE_PROJECT_REF" \
               --use-api \
               --no-verify-jwt
@@ -58,6 +61,7 @@ jobs:
           name: Deploy MCP endpoint
           command: |
             npx supabase functions deploy imagen-mcp \
+              --yes \
               --project-ref "$SUPABASE_PROJECT_REF" \
               --use-api \
               --no-verify-jwt
