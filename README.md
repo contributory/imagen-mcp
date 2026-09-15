@@ -50,8 +50,10 @@ curl -X POST "https://<username>-<valname>.web.val.run/?apiKey=sk-...&baseUrl=ht
   - Supports `prompt`, `size`, `n`, `quality`, `style`, and `extra`
   - The Supabase worker calls the OpenAI-compatible API in the background
   - Provider URLs are passed through directly; base64-only results are uploaded to Supabase Storage and normalized to URLs
+  - `data:image/...;base64,...` values returned in a `url` field are also detected and uploaded to Storage instead of being exposed to MCP clients
 - **`get_image_job`** — Supabase-only tool used to poll a queued job until `completed`/`failed`; completed jobs return URL-only results
 - **`list_models`** — lists all models from `GET /models`; optional `keywords` filters model ids case-insensitively using whitespace/comma-separated terms
+- **Agnes auto-adapter** — when `baseUrl` uses an official Agnes host (`apihub.agnes-ai.com`, `apihub.agnes-ai.cn`, or `api.agnes-ai.cn`), requests automatically use Agnes Image schema: default model `agnes-image-2.1-flash`, `extra_body.response_format`, `extra_body.image`, and provider-specific image sizes. A host-only Agnes URL is normalized to `/v1`.
 - Upstream API credentials arrive per request. On Supabase async mode they are copied into the PGMQ message only for the lifetime of the queued job, then the message is deleted at terminal completion/failure.
 - Runs safely serverless: each request creates a new `McpServer` instance (per-request factory)
 

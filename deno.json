@@ -4,7 +4,8 @@
     "test": "deno run --allow-net --allow-env --allow-import scripts/test-local.ts",
     "test:mock": "deno run --allow-net --allow-env --allow-import scripts/test-mock-api.ts",
     "check": "deno check mcp-image-server.ts supabase-queue.ts scripts/ supabase/functions/imagen-mcp/index.ts supabase/functions/imagen-mcp-worker/index.ts",
-    "test:queue": "deno run --allow-net --allow-env --allow-import scripts/test-queue.ts"
+    "test:queue": "deno run --allow-net --allow-env --allow-import scripts/test-queue.ts",
+    "test:agnes": "deno run --allow-env --allow-import scripts/test-agnes.ts"
   },
   "lint": {
     "include": [

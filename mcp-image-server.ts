@@ -48,6 +48,8 @@ const SERVER_VERSION = "2.2.0";
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 // Last-resort fallback, only used if GET {baseUrl}/models cannot be reached.
 const DEFAULT_MODEL = "dall-e-3";
+const AGNES_DEFAULT_IMAGE_MODEL = "agnes-image-2.1-flash";
+const AGNES_DEFAULT_IMAGE_SIZE = "1024x1024";
 
 // ---------------------------------------------------------------------------
 // Per-request configuration (headers / query params)
@@ -57,6 +59,31 @@ export interface ServerConfig {
   apiKey: string;
   baseUrl: string;
   defaultModel?: string;
+}
+
+/** Detect Agnes by its documented API hosts, not by prompt/model content. */
+export function isAgnesApiBaseUrl(baseUrl: string): boolean {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === "apihub.agnes-ai.com" ||
+      hostname === "apihub.agnes-ai.cn" ||
+      hostname === "api.agnes-ai.cn";
+  } catch {
+    return false;
+  }
+}
+
+/** Agnes accepts a host-only base URL, but the OpenAI SDK needs the /v1 prefix. */
+export function normalizeProviderBaseUrl(baseUrl: string): string {
+  const clean = baseUrl.trim().replace(/\/+$/, "");
+  if (!isAgnesApiBaseUrl(clean)) return clean;
+  try {
+    const url = new URL(clean);
+    if (!url.pathname || url.pathname === "/") url.pathname = "/v1";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return clean;
+  }
 }
 
 /** Read a value from a header first, then from a URL query parameter. */
@@ -90,7 +117,7 @@ function extractConfig(req: Request): ServerConfig {
 
   return {
     apiKey,
-    baseUrl: baseUrl.replace(/\/+$/, ""),
+    baseUrl: normalizeProviderBaseUrl(baseUrl),
     ...(defaultModel ? { defaultModel } : {}),
   };
 }
@@ -293,10 +320,17 @@ function imageOutputFormat(args: { extra?: Record<string, unknown> }): { extensi
   return { extension: "png", contentType: "image/png" };
 }
 
+function parseBase64ImageDataUrl(value: string): { contentType: string; base64: string } | null {
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]+)$/i.exec(value.trim());
+  if (!match) return null;
+  return { contentType: match[1].toLowerCase(), base64: match[2] };
+}
+
 async function uploadBase64ImageToSupabase(
   b64: string,
   model: string,
   args: { extra?: Record<string, unknown> },
+  explicitContentType?: string,
 ): Promise<string> {
   const config = getSupabaseStorageConfig();
   if (!config) {
@@ -306,7 +340,9 @@ async function uploadBase64ImageToSupabase(
   }
 
   const isPublic = await ensureStorageBucket(config);
-  const { extension, contentType } = imageOutputFormat(args);
+  const inferred = imageOutputFormat(args);
+  const contentType = explicitContentType ?? inferred.contentType;
+  const extension = contentType === "image/jpeg" ? "jpg" : contentType === "image/webp" ? "webp" : "png";
   const safeModel = model.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 100) || "model";
   const objectPath = `${safeModel}/${Date.now()}-${crypto.randomUUID()}.${extension}`;
   const { encodedBucket, encodedPath } = storageObjectPath(config.bucket, objectPath);
@@ -414,12 +450,66 @@ export interface ImageGenerationResult {
   warning?: string;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/** Build a provider-specific image request while preserving the generic MCP args. */
+export function buildImageGenerationBody(
+  config: ServerConfig,
+  args: ImageGenerationArgs,
+  model: string,
+): Record<string, unknown> {
+  const isAgnes = isAgnesApiBaseUrl(config.baseUrl);
+  const body: Record<string, unknown> = {
+    model,
+    prompt: args.prompt,
+    n: args.n ?? 1,
+  };
+
+  if (isAgnes) {
+    // Agnes requires size and nests image/output format inside extra_body.
+    body.size = args.size && args.size !== "auto" ? args.size : AGNES_DEFAULT_IMAGE_SIZE;
+    const extra = { ...(args.extra ?? {}) };
+    const extraBody = { ...(asRecord(extra.extra_body) ?? {}) };
+    delete extra.extra_body;
+
+    if ("image" in extra) {
+      if (!("image" in extraBody)) extraBody.image = extra.image;
+      delete extra.image;
+    }
+    if ("response_format" in extra) {
+      if (!("response_format" in extraBody)) extraBody.response_format = extra.response_format;
+      delete extra.response_format;
+    }
+    // URL output is the default contract of this MCP. Explicit b64 settings are
+    // still honored and will be normalized to a Storage URL afterwards.
+    if (!("response_format" in extraBody) && extra.return_base64 !== true) {
+      extraBody.response_format = "url";
+    }
+
+    Object.assign(body, extra);
+    body.extra_body = extraBody;
+    return body;
+  }
+
+  if (!/^(?:gpt[-._]?image|chatgpt[-._]?image)/i.test(model)) body.response_format = "url";
+  if (args.size && args.size !== "auto") body.size = args.size;
+  if (args.quality) body.quality = args.quality;
+  if (args.style) body.style = args.style;
+  if (args.extra && typeof args.extra === "object") Object.assign(body, args.extra);
+  return body;
+}
+
 /** Execute image generation and always normalize image output to URLs. */
 export async function executeImageGeneration(
   config: ServerConfig,
   args: ImageGenerationArgs,
 ): Promise<ImageGenerationResult> {
-  let model = args.model ?? config.defaultModel;
+  const isAgnes = isAgnesApiBaseUrl(config.baseUrl);
+  let model = args.model ?? config.defaultModel ?? (isAgnes ? AGNES_DEFAULT_IMAGE_MODEL : undefined);
   let modelNote: string | undefined;
   if (!model) {
     const picked = await pickModel(config.baseUrl, config.apiKey);
@@ -427,18 +517,9 @@ export async function executeImageGeneration(
     modelNote = picked.warning;
   }
 
-  const body: Record<string, unknown> = {
-    model,
-    prompt: args.prompt,
-    n: args.n ?? 1,
-  };
-  if (!/^(?:gpt[-._]?image|chatgpt[-._]?image)/i.test(model)) body.response_format = "url";
-  if (args.size && args.size !== "auto") body.size = args.size;
-  if (args.quality) body.quality = args.quality;
-  if (args.style) body.style = args.style;
-  if (args.extra && typeof args.extra === "object") Object.assign(body, args.extra);
+  const body = buildImageGenerationBody(config, args, model);
 
-  const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl });
+  const client = new OpenAI({ apiKey: config.apiKey, baseURL: normalizeProviderBaseUrl(config.baseUrl) });
   let data: { created?: number; data?: GeneratedImage[] };
   try {
     data = await client.images.generate(body as unknown as ImageGenerateParamsNonStreaming);
@@ -456,6 +537,17 @@ export async function executeImageGeneration(
   for (let i = 0; i < images.length; i++) {
     const img = images[i] ?? {};
     if (typeof img.url === "string" && img.url) {
+      const dataUrl = parseBase64ImageDataUrl(img.url);
+      if (dataUrl) {
+        try {
+          const url = await uploadBase64ImageToSupabase(dataUrl.base64, model, args, dataUrl.contentType);
+          normalized.push({ index: i, url });
+          continue;
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          throw new Error(`Image storage fallback failed: ${detail}`);
+        }
+      }
       normalized.push({ index: i, url: img.url });
       continue;
     }
@@ -520,11 +612,11 @@ function buildServer(config: ServerConfig, options: BuildServerOptions = {}): Mc
         model: z
           .string()
           .optional()
-          .describe("Optional model override. When omitted, defaultModel from the endpoint query string is used; otherwise the server auto-selects from GET /models."),
+          .describe("Optional model override. When omitted, defaultModel from the endpoint query string is used; Agnes endpoints default to agnes-image-2.1-flash; otherwise the server auto-selects from GET /models."),
         size: z
-          .enum(["256x256", "512x512", "1024x1024", "1024x1792", "1792x1024", "auto"])
+          .string()
           .optional()
-          .describe("Image size. 'auto' or omitting it lets the provider decide."),
+          .describe("Provider-specific image size, e.g. 1024x1024 or 1024x768. 'auto' lets compatible providers decide."),
         n: z.number().int().min(1).max(10).optional().describe("How many images to generate. Defaults to 1."),
         quality: z.enum(["standard", "hd"]).optional().describe("Quality, e.g. for DALL·E 3."),
         style: z.enum(["vivid", "natural"]).optional().describe("Style, e.g. for DALL·E 3."),

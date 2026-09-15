@@ -21,12 +21,35 @@ const SERVER_NAME = "imagen-mcp";
 const SERVER_VERSION = "2.2.0";
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MODEL = "dall-e-3";
+const AGNES_DEFAULT_IMAGE_MODEL = "agnes-image-2.1-flash";
+const AGNES_DEFAULT_IMAGE_SIZE = "1024x1024";
 
 // ---- helpers ----
 function getHeader(req, name) {
   const v = req.headers[name.toLowerCase()];
   if (Array.isArray(v)) return v[0] ?? "";
   return v ?? "";
+}
+
+function isAgnesApiBaseUrl(baseUrl) {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === "apihub.agnes-ai.com" || hostname === "apihub.agnes-ai.cn" || hostname === "api.agnes-ai.cn";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeProviderBaseUrl(baseUrl) {
+  const clean = String(baseUrl ?? "").trim().replace(/\/+$/, "");
+  if (!isAgnesApiBaseUrl(clean)) return clean;
+  try {
+    const url = new URL(clean);
+    if (!url.pathname || url.pathname === "/") url.pathname = "/v1";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return clean;
+  }
 }
 
 function extractConfig(req) {
@@ -45,7 +68,7 @@ function extractConfig(req) {
 
   return {
     apiKey: String(apiKey).trim(),
-    baseUrl: String(baseUrl).trim().replace(/\/+$/, ""),
+    baseUrl: normalizeProviderBaseUrl(baseUrl),
     ...(defaultModel ? { defaultModel } : {}),
   };
 }
@@ -134,14 +157,22 @@ function imageOutputFormat(args) {
   return { extension: "png", contentType: "image/png" };
 }
 
-async function uploadBase64ImageToSupabase(b64, model, args) {
+function parseBase64ImageDataUrl(value) {
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]+)$/i.exec(String(value).trim());
+  if (!match) return null;
+  return { contentType: match[1].toLowerCase(), base64: match[2] };
+}
+
+async function uploadBase64ImageToSupabase(b64, model, args, explicitContentType) {
   const config = getSupabaseStorageConfig();
   if (!config) {
     throw new Error("Supabase Storage fallback is not configured. SUPABASE_URL and a Supabase secret/service-role key are required when the provider only returns base64 image data.");
   }
 
   const isPublic = await ensureStorageBucket(config);
-  const { extension, contentType } = imageOutputFormat(args);
+  const inferred = imageOutputFormat(args);
+  const contentType = explicitContentType ?? inferred.contentType;
+  const extension = contentType === "image/jpeg" ? "jpg" : contentType === "image/webp" ? "webp" : "png";
   const safeModel = String(model).replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 100) || "model";
   const objectPath = `${safeModel}/${Date.now()}-${crypto.randomUUID()}.${extension}`;
   const { encodedBucket, encodedPath } = storageObjectPath(config.bucket, objectPath);
@@ -197,9 +228,45 @@ async function pickModel(baseUrl, apiKey) {
   }
 }
 
+function asRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+function buildImageGenerationBody(config, args, model) {
+  const isAgnes = isAgnesApiBaseUrl(config.baseUrl);
+  const body = { model, prompt: args.prompt, n: args.n ?? 1 };
+
+  if (isAgnes) {
+    body.size = args.size && args.size !== "auto" ? args.size : AGNES_DEFAULT_IMAGE_SIZE;
+    const extra = { ...(args.extra ?? {}) };
+    const extraBody = { ...(asRecord(extra.extra_body) ?? {}) };
+    delete extra.extra_body;
+    if ("image" in extra) {
+      if (!("image" in extraBody)) extraBody.image = extra.image;
+      delete extra.image;
+    }
+    if ("response_format" in extra) {
+      if (!("response_format" in extraBody)) extraBody.response_format = extra.response_format;
+      delete extra.response_format;
+    }
+    if (!("response_format" in extraBody) && extra.return_base64 !== true) extraBody.response_format = "url";
+    Object.assign(body, extra);
+    body.extra_body = extraBody;
+    return body;
+  }
+
+  if (!/^(?:gpt[-._]?image|chatgpt[-._]?image)/i.test(model)) body.response_format = "url";
+  if (args.size && args.size !== "auto") body.size = args.size;
+  if (args.quality) body.quality = args.quality;
+  if (args.style) body.style = args.style;
+  if (args.extra && typeof args.extra === "object") Object.assign(body, args.extra);
+  return body;
+}
+
 // ---- core ----
 async function generateImages(config, args) {
-  let model = args.model ?? config.defaultModel;
+  const isAgnes = isAgnesApiBaseUrl(config.baseUrl);
+  let model = args.model ?? config.defaultModel ?? (isAgnes ? AGNES_DEFAULT_IMAGE_MODEL : undefined);
   let modelNote;
   if (!model) {
     const picked = await pickModel(config.baseUrl, config.apiKey);
@@ -207,15 +274,9 @@ async function generateImages(config, args) {
     modelNote = picked.warning;
   }
 
-  const body = { model, prompt: args.prompt, n: args.n ?? 1 };
-  // Request URL output where OpenAI-compatible providers support it. Official GPT Image models ignore/reject this field.
-  if (!/^(?:gpt[-._]?image|chatgpt[-._]?image)/i.test(model)) body.response_format = "url";
-  if (args.size && args.size !== "auto") body.size = args.size;
-  if (args.quality) body.quality = args.quality;
-  if (args.style) body.style = args.style;
-  if (args.extra && typeof args.extra === "object") Object.assign(body, args.extra);
+  const body = buildImageGenerationBody(config, args, model);
 
-  const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl });
+  const client = new OpenAI({ apiKey: config.apiKey, baseURL: normalizeProviderBaseUrl(config.baseUrl) });
   let data;
   try {
     data = await client.images.generate(body);
@@ -235,8 +296,20 @@ async function generateImages(config, args) {
     const img = images[i] ?? {};
     const entry = { index: i };
     if (typeof img.url === "string" && img.url) {
-      entry.url = img.url;
-      markdownLines.push(`Image ${i+1}: ${img.url}`);
+      const dataUrl = parseBase64ImageDataUrl(img.url);
+      if (dataUrl) {
+        try {
+          const url = await uploadBase64ImageToSupabase(dataUrl.base64, model, args, dataUrl.contentType);
+          entry.url = url;
+          markdownLines.push(`Image ${i+1}: ${url}`);
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          return { content: [{ type: "text", text: `Image storage fallback failed: ${detail}` }], isError: true };
+        }
+      } else {
+        entry.url = img.url;
+        markdownLines.push(`Image ${i+1}: ${img.url}`);
+      }
     } else if (typeof img.b64_json === "string" && img.b64_json) {
       try {
         const url = await uploadBase64ImageToSupabase(img.b64_json, model, args);
@@ -262,7 +335,7 @@ function buildServer(config) {
     description: "Generate images via OpenAI-compatible API. Config via headers X-OpenAI-Api-Key / X-OpenAI-Base-Url, query ?apiKey=&baseUrl=, or env OPENAI_API_KEY/OPENAI_BASE_URL.",
     inputSchema: z.object({
       prompt: z.string().describe("Detailed text description of the image(s) to generate."),
-      model: z.string().optional().describe("Optional model override. When omitted, defaultModel from the endpoint query string is used; otherwise auto-select from GET /models."),
+      model: z.string().optional().describe("Optional model override. When omitted, defaultModel from the endpoint query string is used; Agnes endpoints default to agnes-image-2.1-flash; otherwise auto-select from GET /models."),
       size: z.enum(["256x256","512x512","1024x1024","1024x1792","1792x1024","auto"]).optional(),
       n: z.number().int().min(1).max(10).optional(),
       quality: z.enum(["standard","hd"]).optional(),

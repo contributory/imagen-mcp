@@ -38,6 +38,12 @@ const mock = Deno.serve({ port: 8788, hostname: "127.0.0.1", onListen: () => {} 
   if (req.method === "POST" && url.pathname === "/v1/images/generations") {
     const body = await req.json() as { model?: string };
     lastGenerationModel = body.model;
+    if (body.model === "lucid-origin") {
+      return Response.json({
+        created: 1717000000,
+        data: [{ url: `data:image/png;base64,${MOCK_BASE64}` }],
+      });
+    }
     if (typeof body.model === "string" && /^gpt-image/i.test(body.model)) {
       return Response.json({
         created: 1717000000,
@@ -264,6 +270,26 @@ async function main() {
     throw new Error(`FAIL: storage fallback did not create/upload correctly: created=${storageBucketCreated} bytes=${storageUploadBytes} path=${storageUploadPath}`);
   }
   console.log("base64 uploaded to Supabase Storage; URL returned without leaking image data ✅");
+
+  console.log("\n=== H. data URL returned in url field is uploaded to Supabase Storage ===");
+  const dataUrlOnly = await post(BASE, rpc(12, "tools/call", {
+    name: "generate_image",
+    arguments: { prompt: "cyberpunk Hanoi", model: "lucid-origin" },
+  }), HEADERS);
+  const dataUrlResult = resultOf(dataUrlOnly.text) as RpcResult;
+  const dataUrlText = dataUrlResult?.result?.content?.[0]?.text ?? "";
+  const dataUrlImages = (dataUrlResult?.result?.structuredContent as { images?: { url?: string }[] } | undefined)?.images ?? [];
+  const dataUrlStored = dataUrlImages[0]?.url ?? "";
+  if (!dataUrlStored.startsWith(`${STORAGE_BASE}/storage/v1/object/public/imagen-mcp-generated/lucid-origin/`)) {
+    throw new Error(`FAIL: expected data URL to be normalized through Storage, got ${dataUrlStored}`);
+  }
+  if (dataUrlOnly.text.includes("data:image/") || dataUrlOnly.text.includes(MOCK_BASE64) || dataUrlText.includes("SHOULD_NOT_LEAK_BASE64_IMAGE_DATA")) {
+    throw new Error("FAIL: data URL/base64 leaked into MCP response");
+  }
+  if (!storageUploadPath.includes("/lucid-origin/")) {
+    throw new Error(`FAIL: data URL upload used unexpected path ${storageUploadPath}`);
+  }
+  console.log("data URL base64 uploaded to Supabase Storage; only URL returned ✅");
 
   console.log("\nAll checks passed. ✅");
   mock.shutdown();

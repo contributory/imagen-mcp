@@ -62,6 +62,14 @@ The standalone generation path does not remember model selection. On Supabase, P
   `n?` (1–10), `quality?`, `style?`, `extra?` (passthrough record merged into the body). The synchronous path returns URL-only results; the Supabase wrapper queues the same args and returns `job_id`.
 - `list_models` — calls `GET {baseUrl}/models` and returns all model ids. Optional `keywords` is split on whitespace/commas and all terms must match the model id case-insensitively.
 
+### Agnes adapter
+
+- Detect Agnes from the official API host, not from prompt content. Supported hosts: `apihub.agnes-ai.com`, `apihub.agnes-ai.cn`, `api.agnes-ai.cn`.
+- A host-only Agnes `baseUrl` is normalized to `/v1`.
+- Model precedence remains explicit `model` → `defaultModel`; if neither is set on Agnes, use `agnes-image-2.1-flash` without calling `/models`.
+- Agnes payloads must not put `response_format` at top level. Use `extra_body.response_format`; move generic `extra.image` into `extra_body.image`.
+- Agnes requires a size; default to `1024x1024` when omitted/`auto`. Provider-specific sizes such as `1024x768` are accepted.
+
 ### Supabase async queue
 
 - The Supabase MCP wrapper uses `supabaseMcpHandler`: `generate_image` enqueues into PGMQ and returns `job_id`; `get_image_job` polls results.
@@ -74,6 +82,7 @@ The standalone generation path does not remember model selection. On Supabase, P
 
 - Provider URLs are returned directly.
 - `b64_json` output is decoded and uploaded to Supabase Storage.
+- `data:image/...;base64,...` returned through an image `url` field is treated as base64 too, uploaded to Storage, and never exposed to MCP clients.
 - Uses `SUPABASE_URL` plus current `SUPABASE_SECRET_KEYS` or legacy `SUPABASE_SERVICE_ROLE_KEY`; `SUPABASE_SECRET_KEY` is also accepted when supplied manually.
 - Bucket defaults to `imagen-mcp-generated`; override with `SUPABASE_STORAGE_BUCKET`.
 - Missing bucket is auto-created public; an existing private bucket uses a signed URL.
