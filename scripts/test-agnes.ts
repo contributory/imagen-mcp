@@ -4,7 +4,7 @@ import {
   normalizeProviderBaseUrl,
   type ImageGenerationArgs,
   type ServerConfig,
-} from "../mcp-image-server.ts";
+} from "../main.ts";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);

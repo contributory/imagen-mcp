@@ -2,7 +2,7 @@ import {
   executeImageGeneration,
   type ImageGenerationArgs,
   type ServerConfig,
-} from "../../../mcp-image-server.ts";
+} from "../../../main.ts";
 import {
   deleteImageQueueMessage,
   getImageJob,

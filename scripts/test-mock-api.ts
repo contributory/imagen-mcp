@@ -21,7 +21,7 @@ Deno.env.set("SUPABASE_URL", STORAGE_BASE);
 Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key");
 Deno.env.set("SUPABASE_STORAGE_BUCKET", "imagen-mcp-generated");
 
-const { mcpHandler } = await import("../mcp-image-server.ts");
+const { mcpHandler } = await import("../main.ts");
 
 // ---- mock API + Supabase Storage server ----------------------------------
 const MOCK_URL = "https://cdn.example.com/img-1.png";

@@ -1,47 +1,99 @@
 /**
- * MCP Image Generation Server — Node.js thuần (không Val Town / Deno)
- * Chạy:
- *   npm install
- *   node main.js              # HTTP http://127.0.0.1:3000/mcp
- *   node main.js --stdio      # STDIO cho Claude Desktop
- *   PORT=3000 OPENAI_API_KEY=sk-... node main.js
+ * ============================================================================
+ * MCP Image Generation Server (imagen-mcp)
+ * ----------------------------------------------------------------------------
+ * An MCP (Model Context Protocol) server that generates images through any
+ * OpenAI-compatible image API (OpenAI DALL·E, gpt-image-1, Groq, Together,
+ * OpenRouter, local vLLM / LiteLLM, ...).
+ *
+ * Runs on Deno and is designed to be deployed as a Val Town HTTP val.
+ *
+ * UPSTREAM API CREDENTIALS ARE PER REQUEST — the OpenAI-compatible API base URL
+ * and API key are supplied by the MCP client via HTTP headers or URL query
+ * parameters. Supabase deployments additionally use platform-provided env vars
+ * for Queue/Storage administration:
+ *
+ *   Headers:
+ *     X-Api-Key: <api key>                        (required)
+ *     X-Base-Url: https://api.openai.com/v1       (optional)
+ *
+ *   Multiple upstream providers can be registered on a single request using
+ *   indexed headers (base URL + API key for each index N >= 1):
+ *       X-Base-Url-1 / X-Api-Key-1
+ *       X-Base-Url-2 / X-Api-Key-2
+ *       ...
+ *   Pick which registered provider a call should use with:
+ *       X-Provider: <N>      (or as a query param: ?provider=<N>)
+ *   When X-Provider is omitted or unknown, the primary X-Api-Key /
+ *   X-Base-Url config is used.
+ *   The legacy X-OpenAI-* header names remain accepted for backwards compat.
+ *   Alternative for the key:  Authorization: Bearer <api key>
+ *   Or as URL query params:   ?apiKey=...&baseUrl=...&defaultModel=...
+ *
+ *   `defaultModel` can be supplied as a query parameter. The `model` tool
+ *   argument overrides it per call; otherwise the server falls back to model
+ *   auto-selection from GET {baseUrl}/models.
+ *
+ * DEPLOY ON VAL TOWN
+ *   1. Create a new HTTP val (or open the file in the Val Town editor) and
+ *      paste this file's content.
+ *   2. Add the HTTP trigger and save — your endpoint is live at
+ *      https://<user>-<val>.web.val.run
+ *   3. Point any MCP client (Claude Desktop, Cursor, Copilot, ...) at that URL
+ *      using the "Streamable HTTP" transport, passing the headers / query
+ *      params above.
+ * ============================================================================
  */
 
-import { createServer } from "node:http";
-import { fileURLToPath } from "node:url";
+import { createMcpHandler, McpServer } from "npm:@modelcontextprotocol/server";
+import { z } from "npm:zod@4";
+import OpenAI from "npm:openai";
+import type { ImageGenerateParamsNonStreaming } from "npm:openai/resources/images";
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-import OpenAI from "openai";
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
-// ---- config ----
 const SERVER_NAME = "imagen-mcp";
 const SERVER_VERSION = "2.2.0";
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
+// Last-resort fallback, only used if GET {baseUrl}/models cannot be reached.
 const DEFAULT_MODEL = "dall-e-3";
 const AGNES_DEFAULT_IMAGE_MODEL = "agnes-image-2.1-flash";
 const AGNES_DEFAULT_IMAGE_SIZE = "1024x1024";
 
-// ---- helpers ----
-function getHeader(req, name) {
-  const v = req.headers[name.toLowerCase()];
-  if (Array.isArray(v)) return v[0] ?? "";
-  return v ?? "";
+// ---------------------------------------------------------------------------
+// Per-request configuration (headers / query params)
+// ---------------------------------------------------------------------------
+
+export interface ProviderConfig {
+  baseUrl: string;
+  apiKey: string;
 }
 
-function isAgnesApiBaseUrl(baseUrl) {
+export interface ServerConfig {
+  apiKey: string;
+  baseUrl: string;
+  defaultModel?: string;
+  /** Additional upstream providers keyed by numeric index (e.g. "1", "2"). */
+  providers?: Record<string, ProviderConfig>;
+}
+
+/** Detect Agnes by its documented API hosts, not by prompt/model content. */
+export function isAgnesApiBaseUrl(baseUrl: string): boolean {
   try {
     const hostname = new URL(baseUrl).hostname.toLowerCase();
-    return hostname === "apihub.agnes-ai.com" || hostname === "apihub.agnes-ai.cn" || hostname === "api.agnes-ai.cn";
+    return hostname === "apihub.agnes-ai.com" ||
+      hostname === "apihub.agnes-ai.cn" ||
+      hostname === "api.agnes-ai.cn";
   } catch {
     return false;
   }
 }
 
-function normalizeProviderBaseUrl(baseUrl) {
-  const clean = String(baseUrl ?? "").trim().replace(/\/+$/, "");
+/** Agnes accepts a host-only base URL, but the OpenAI SDK needs the /v1 prefix. */
+export function normalizeProviderBaseUrl(baseUrl: string): string {
+  const clean = baseUrl.trim().replace(/\/+$/, "");
   if (!isAgnesApiBaseUrl(clean)) return clean;
   try {
     const url = new URL(clean);
@@ -52,19 +104,34 @@ function normalizeProviderBaseUrl(baseUrl) {
   }
 }
 
-function collectIndexedProviders(req) {
-  const providers = {};
+/** Read a value from a header first, then from a URL query parameter. */
+function headerOrParam(
+  headers: Headers,
+  headerName: string,
+  params: URLSearchParams,
+  paramName: string,
+  fallback = "",
+): string {
+  const fromHeader = headers.get(headerName);
+  if (fromHeader) return fromHeader.trim();
+  const fromParam = params.get(paramName);
+  if (fromParam) return fromParam.trim();
+  return fallback;
+}
+
+/** Collect indexed upstream providers (base URL + API key) from headers. */
+function collectIndexedProviders(headers: Headers): Record<string, ProviderConfig> {
+  const providers: Record<string, ProviderConfig> = {};
   const basePrefixes = ["x-base-url-", "x-openai-base-url-"];
   const keyPrefixes = ["x-api-key-", "x-openai-api-key-"];
-  for (const [name, value] of Object.entries(req.headers)) {
-    const lower = String(name).toLowerCase();
-    const v = Array.isArray(value) ? value[0] ?? "" : String(value ?? "");
+  for (const [name, value] of headers) {
+    const lower = name.toLowerCase();
     for (const prefix of basePrefixes) {
       if (lower.startsWith(prefix)) {
         const idx = lower.slice(prefix.length);
         if (/^\d+$/.test(idx)) {
           const pv = providers[idx] ?? { baseUrl: "", apiKey: "" };
-          pv.baseUrl = normalizeProviderBaseUrl(v.trim());
+          pv.baseUrl = normalizeProviderBaseUrl(value.trim());
           providers[idx] = pv;
         }
       }
@@ -74,7 +141,7 @@ function collectIndexedProviders(req) {
         const idx = lower.slice(prefix.length);
         if (/^\d+$/.test(idx)) {
           const pv = providers[idx] ?? { baseUrl: "", apiKey: "" };
-          pv.apiKey = v.trim();
+          pv.apiKey = value.trim();
           providers[idx] = pv;
         }
       }
@@ -86,59 +153,184 @@ function collectIndexedProviders(req) {
   return providers;
 }
 
-function extractConfig(req) {
-  const host = getHeader(req, "host") || "localhost";
-  const url = new URL(req.url ?? "/", `http://${host}`);
+/** Extract base URL / API key from the request headers or query params. */
+function extractConfig(req: Request): ServerConfig {
+  const url = new URL(req.url);
+  const headers = req.headers;
 
-  let apiKey = getHeader(req, "x-api-key") || getHeader(req, "x-openai-api-key") || url.searchParams.get("apiKey") || "";
+  // Primary API key: X-Api-Key header, then legacy X-OpenAI-Api-Key, then a
+  // query param, then Authorization: Bearer.
+  let apiKey = headerOrParam(headers, "x-api-key", url.searchParams, "apiKey");
+  if (!apiKey) apiKey = headerOrParam(headers, "x-openai-api-key", url.searchParams, "apiKey");
   if (!apiKey) {
-    const auth = getHeader(req, "authorization");
+    const auth = headers.get("authorization") ?? "";
     if (auth.startsWith("Bearer ")) apiKey = auth.slice(7).trim();
   }
-  if (!apiKey) apiKey = process.env.OPENAI_API_KEY ?? process.env.X_OPENAI_API_KEY ?? "";
 
-  let baseUrl = getHeader(req, "x-base-url") || getHeader(req, "x-openai-base-url") || url.searchParams.get("baseUrl") || process.env.OPENAI_BASE_URL || DEFAULT_BASE_URL;
-  const defaultModel = String(url.searchParams.get("defaultModel") || "").trim();
+  // Primary base URL: X-Base-Url header, then legacy X-OpenAI-Base-Url, then
+  // a query param.
+  let baseUrl = headerOrParam(headers, "x-base-url", url.searchParams, "baseUrl");
+  if (!baseUrl) baseUrl = headerOrParam(headers, "x-openai-base-url", url.searchParams, "baseUrl", DEFAULT_BASE_URL);
 
-  const providers = collectIndexedProviders(req);
-  const selectedIndex = getHeader(req, "x-provider") || url.searchParams.get("provider") || "";
-  if (selectedIndex && providers[selectedIndex]) {
+  // Additional upstream providers registered via indexed headers.
+  const providers = collectIndexedProviders(headers);
+
+  // Provider selection: X-Provider header or ?provider= (index of a registered
+  // indexed provider). Falls back to the primary config when unspecified or
+  // unknown.
+  const selectedIndex = headerOrParam(headers, "x-provider", url.searchParams, "provider").trim();
+  if (providers[selectedIndex]) {
     baseUrl = providers[selectedIndex].baseUrl;
     apiKey = providers[selectedIndex].apiKey;
   }
 
+  const defaultModel = (url.searchParams.get("defaultModel") ?? "").trim();
+
   return {
-    apiKey: String(apiKey).trim(),
+    apiKey,
     baseUrl: normalizeProviderBaseUrl(baseUrl),
     ...(Object.keys(providers).length ? { providers } : {}),
     ...(defaultModel ? { defaultModel } : {}),
   };
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI-compatible image generation
+// ---------------------------------------------------------------------------
+
+interface GeneratedImage {
+  url?: string;
+  b64_json?: string;
+}
+
+
 
 const DEFAULT_STORAGE_BUCKET = "imagen-mcp-generated";
 
-function getSupabaseServiceKey() {
-  const plain = String(process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SECRET_KEY ?? "").trim();
+interface SupabaseStorageConfig {
+  url: string;
+  serviceKey: string;
+  bucket: string;
+}
+
+function getSupabaseServiceKey(): string {
+  const plain = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SECRET_KEY") ?? "").trim();
   if (plain) return plain;
-  const json = process.env.SUPABASE_SECRET_KEYS;
+  const json = Deno.env.get("SUPABASE_SECRET_KEYS");
   if (!json) return "";
   try {
-    const keys = JSON.parse(json);
-    return typeof keys?.default === "string" ? keys.default.trim() : "";
+    const keys = JSON.parse(json) as Record<string, unknown>;
+    for (const name of ["service_role", "serviceRole", "secret", "default"]) {
+      const value = keys[name];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    for (const value of Object.values(keys)) {
+      if (typeof value === "string" && value.startsWith("sb_secret_") && value.trim()) return value.trim();
+    }
+    return "";
   } catch {
     return "";
   }
 }
 
-function getSupabaseStorageConfig() {
-  const url = String(process.env.SUPABASE_URL ?? "").trim().replace(/\/+$/, "");
+function getSupabaseStorageConfig(): SupabaseStorageConfig | null {
+  const url = (Deno.env.get("SUPABASE_URL") ?? "").trim().replace(/\/+$/, "");
   const serviceKey = getSupabaseServiceKey();
-  const bucket = String(process.env.SUPABASE_STORAGE_BUCKET ?? DEFAULT_STORAGE_BUCKET).trim();
+  const bucket = (Deno.env.get("SUPABASE_STORAGE_BUCKET") ?? DEFAULT_STORAGE_BUCKET).trim();
   return url && serviceKey && bucket ? { url, serviceKey, bucket } : null;
 }
 
-function storageHeaders(serviceKey, contentType) {
+interface SupabaseAdminConfig {
+  url: string;
+  serviceKey: string;
+}
+
+function getSupabaseAdminConfig(): SupabaseAdminConfig | null {
+  const url = (Deno.env.get("SUPABASE_URL") ?? "").trim().replace(/\/+$/, "");
+  const serviceKey = getSupabaseServiceKey();
+  return url && serviceKey ? { url, serviceKey } : null;
+}
+
+function supabaseAdminHeaders(serviceKey: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${serviceKey}`,
+    apikey: serviceKey,
+    "Content-Type": "application/json",
+  };
+}
+
+async function supabaseRpc<T>(functionName: string, body: Record<string, unknown>): Promise<T> {
+  const config = getSupabaseAdminConfig();
+  if (!config) throw new Error("Supabase queue is not configured.");
+  const res = await fetch(`${config.url}/rest/v1/rpc/${functionName}`, {
+    method: "POST",
+    headers: supabaseAdminHeaders(config.serviceKey),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`Supabase RPC ${functionName} failed (HTTP ${res.status}): ${await res.text()}`);
+  }
+  if (res.status === 204) return undefined as T;
+  return await res.json() as T;
+}
+
+async function enqueueImageJob(
+  jobId: string,
+  request: Record<string, unknown>,
+  payload: Record<string, unknown>,
+): Promise<number> {
+  return await supabaseRpc<number>("imagen_enqueue_image_job", {
+    p_job_id: jobId,
+    p_request: request,
+    p_payload: payload,
+  });
+}
+
+interface ImageJobRow {
+  id: string;
+  created_at: string;
+  updated_at: string;
+  status: "queued" | "processing" | "completed" | "failed";
+  request: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  attempts: number;
+}
+
+async function getImageJob(jobId: string): Promise<ImageJobRow | null> {
+  const config = getSupabaseAdminConfig();
+  if (!config) throw new Error("Supabase queue is not configured.");
+  const query = new URLSearchParams({
+    id: `eq.${jobId}`,
+    select: "id,created_at,updated_at,status,request,result,error,attempts",
+    limit: "1",
+  });
+  const res = await fetch(`${config.url}/rest/v1/image_jobs?${query}`, {
+    headers: supabaseAdminHeaders(config.serviceKey),
+  });
+  if (!res.ok) throw new Error(`Supabase image job lookup failed (HTTP ${res.status}): ${await res.text()}`);
+  const rows = await res.json() as ImageJobRow[];
+  return rows[0] ?? null;
+}
+
+async function kickImageWorker(): Promise<{ ok: boolean; detail?: string }> {
+  const config = getSupabaseAdminConfig();
+  if (!config) return { ok: false, detail: "Supabase queue is not configured." };
+  try {
+    const res = await fetch(`${config.url}/functions/v1/imagen-mcp-worker`, {
+      method: "POST",
+      headers: supabaseAdminHeaders(config.serviceKey),
+      body: JSON.stringify({ source: "imagen-mcp" }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return { ok: false, detail: `worker HTTP ${res.status}: ${await res.text()}` };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function storageHeaders(serviceKey: string, contentType?: string): Record<string, string> {
   return {
     Authorization: `Bearer ${serviceKey}`,
     apikey: serviceKey,
@@ -146,22 +338,23 @@ function storageHeaders(serviceKey, contentType) {
   };
 }
 
-function storageObjectPath(bucket, objectPath) {
-  const encodedBucket = encodeURIComponent(bucket);
-  const encodedPath = objectPath.split("/").map(encodeURIComponent).join("/");
-  return { encodedBucket, encodedPath };
+function storageObjectPath(bucket: string, objectPath: string): { encodedBucket: string; encodedPath: string } {
+  return {
+    encodedBucket: encodeURIComponent(bucket),
+    encodedPath: objectPath.split("/").map(encodeURIComponent).join("/"),
+  };
 }
 
-async function ensureStorageBucket(config) {
+async function ensureStorageBucket(config: SupabaseStorageConfig): Promise<boolean> {
   const encodedBucket = encodeURIComponent(config.bucket);
-  const getBucket = async () => fetch(`${config.url}/storage/v1/bucket/${encodedBucket}`, {
+  const getBucket = () => fetch(`${config.url}/storage/v1/bucket/${encodedBucket}`, {
     headers: storageHeaders(config.serviceKey),
   });
 
   let res = await getBucket();
   if (res.ok) {
-    const info = await res.json().catch(() => ({}));
-    return Boolean(info?.public);
+    const info = await res.json().catch(() => ({})) as { public?: boolean };
+    return Boolean(info.public);
   }
   if (res.status !== 404) {
     throw new Error(`Supabase Storage bucket check failed (HTTP ${res.status}): ${await res.text()}`);
@@ -181,51 +374,60 @@ async function ensureStorageBucket(config) {
   if (!res.ok) {
     throw new Error(`Supabase Storage bucket check failed after create race (HTTP ${res.status}): ${await res.text()}`);
   }
-  const info = await res.json().catch(() => ({}));
-  return Boolean(info?.public);
+  const info = await res.json().catch(() => ({})) as { public?: boolean };
+  return Boolean(info.public);
 }
 
-function decodeBase64Image(b64) {
+function decodeBase64Image(b64: string): Uint8Array {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
 
-function imageOutputFormat(args) {
+function imageOutputFormat(args: { extra?: Record<string, unknown> }): { extension: string; contentType: string } {
   const format = typeof args.extra?.output_format === "string" ? args.extra.output_format.toLowerCase() : "png";
   if (format === "jpeg" || format === "jpg") return { extension: "jpg", contentType: "image/jpeg" };
   if (format === "webp") return { extension: "webp", contentType: "image/webp" };
   return { extension: "png", contentType: "image/png" };
 }
 
-function parseBase64ImageDataUrl(value) {
-  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]+)$/i.exec(String(value).trim());
+function parseBase64ImageDataUrl(value: string): { contentType: string; base64: string } | null {
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]+)$/i.exec(value.trim());
   if (!match) return null;
   return { contentType: match[1].toLowerCase(), base64: match[2] };
 }
 
-async function uploadBase64ImageToSupabase(b64, model, args, explicitContentType) {
+async function uploadBase64ImageToSupabase(
+  b64: string,
+  model: string,
+  args: { extra?: Record<string, unknown> },
+  explicitContentType?: string,
+): Promise<string> {
   const config = getSupabaseStorageConfig();
   if (!config) {
-    throw new Error("Supabase Storage fallback is not configured. SUPABASE_URL and a Supabase secret/service-role key are required when the provider only returns base64 image data.");
+    throw new Error(
+      "Supabase Storage fallback is not configured. SUPABASE_URL and a Supabase secret/service-role key are required when the provider only returns base64 image data.",
+    );
   }
 
   const isPublic = await ensureStorageBucket(config);
   const inferred = imageOutputFormat(args);
   const contentType = explicitContentType ?? inferred.contentType;
   const extension = contentType === "image/jpeg" ? "jpg" : contentType === "image/webp" ? "webp" : "png";
-  const safeModel = String(model).replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 100) || "model";
+  const safeModel = model.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 100) || "model";
   const objectPath = `${safeModel}/${Date.now()}-${crypto.randomUUID()}.${extension}`;
   const { encodedBucket, encodedPath } = storageObjectPath(config.bucket, objectPath);
 
+  const bytes = decodeBase64Image(b64);
+  const uploadBody = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   const upload = await fetch(`${config.url}/storage/v1/object/${encodedBucket}/${encodedPath}`, {
     method: "POST",
     headers: {
       ...storageHeaders(config.serviceKey, contentType),
       "x-upsert": "false",
     },
-    body: decodeBase64Image(b64),
+    body: uploadBody,
   });
   if (!upload.ok) {
     throw new Error(`Supabase Storage upload failed (HTTP ${upload.status}): ${await upload.text()}`);
@@ -243,46 +445,109 @@ async function uploadBase64ImageToSupabase(b64, model, args, explicitContentType
   if (!sign.ok) {
     throw new Error(`Supabase Storage signed URL creation failed (HTTP ${sign.status}): ${await sign.text()}`);
   }
-  const signed = await sign.json();
-  if (typeof signed?.signedURL !== "string" || !signed.signedURL) {
-    throw new Error("Supabase Storage did not return a signed URL.");
-  }
+  const signed = await sign.json() as { signedURL?: string };
+  if (!signed.signedURL) throw new Error("Supabase Storage did not return a signed URL.");
   return new URL(signed.signedURL, `${config.url}/`).toString();
 }
 
-// ---- image-model detection / auto-select ----
-// Curated known image-generation families; delimiter-aware to avoid broad false positives.
-const IMAGE_MODEL_REGEX = /(?:^|[\/:._-])(?:gpt[-._]?image|chatgpt[-._]?image|dall[-._]?e|imagen|gemini[-._][a-z0-9._-]*[-._]image|flux(?:[-._]?\d+(?:\.\d+)*)?|stable[-._]?(?:diffusion|image)|sdxl|sd3(?:[-._]?\d+(?:\.\d+)*)?|qwen[-._]?image|wan(?:[-._]?\d+(?:\.\d+)*)?[-._]?(?:image|t2i|i2i)|z[-._]?image|ideogram|recraft|seedream|hidream|midjourney|firefly[-._]?image|sana|playground|photon|auraflow|pixart|kolors|cogview|hunyuan[-._]?image)(?=$|[\/:._-])/i;
-function looksImageCapable(id) { return IMAGE_MODEL_REGEX.test(id); }
+// ---------------------------------------------------------------------------
+// Model auto-selection via GET {baseUrl}/models
+// ---------------------------------------------------------------------------
 
-async function pickModel(baseUrl, apiKey) {
+/** Curated known image-generation families; delimiter-aware to avoid broad false positives. */
+const IMAGE_MODEL_REGEX = /(?:^|[\/:._-])(?:gpt[-._]?image|chatgpt[-._]?image|dall[-._]?e|imagen|gemini[-._][a-z0-9._-]*[-._]image|flux(?:[-._]?\d+(?:\.\d+)*)?|stable[-._]?(?:diffusion|image)|sdxl|sd3(?:[-._]?\d+(?:\.\d+)*)?|qwen[-._]?image|wan(?:[-._]?\d+(?:\.\d+)*)?[-._]?(?:image|t2i|i2i)|z[-._]?image|ideogram|recraft|seedream|hidream|midjourney|firefly[-._]?image|sana|playground|photon|auraflow|pixart|kolors|cogview|hunyuan[-._]?image)(?=$|[\/:._-])/i;
+
+/** Best-effort classification of an image-generation model id. */
+function looksImageCapable(id: string): boolean {
+  return IMAGE_MODEL_REGEX.test(id);
+}
+
+interface ModelPick {
+  model: string;
+  warning?: string;
+}
+
+/**
+ * Pick a model by querying GET {baseUrl}/models and filtering through the
+ * curated image-model regex. Falls back to DEFAULT_MODEL if none match.
+ */
+async function pickModel(baseUrl: string, apiKey: string): Promise<ModelPick> {
+  const endpoint = `${baseUrl}/models`;
   try {
-    const res = await fetch(`${baseUrl}/models`, { headers: { Authorization: `Bearer ${apiKey}` } });
-    if (!res.ok) return { model: DEFAULT_MODEL, warning: `Could not list models (HTTP ${res.status}); using fallback "${DEFAULT_MODEL}".` };
-    const data = await res.json();
-    const ids = (data.data ?? []).map(m => m.id).filter(id => typeof id === "string" && id.length > 0);
-    if (ids.length === 0) return { model: DEFAULT_MODEL, warning: `No models returned; using fallback "${DEFAULT_MODEL}".` };
+    const res = await fetch(endpoint, { headers: { Authorization: `Bearer ${apiKey}` } });
+    if (!res.ok) {
+      return {
+        model: DEFAULT_MODEL,
+        warning: `Could not list models (HTTP ${res.status}); using fallback model "${DEFAULT_MODEL}".`,
+      };
+    }
+    const data = (await res.json()) as { data?: { id?: string }[] };
+    const ids = (data.data ?? [])
+      .map((m) => m.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    if (ids.length === 0) {
+      return { model: DEFAULT_MODEL, warning: `No models returned by /models; using fallback model "${DEFAULT_MODEL}".` };
+    }
     const imageModels = ids.filter(looksImageCapable);
-    if (imageModels.length === 0) return { model: DEFAULT_MODEL, warning: `No known image-generation model matched /models; using fallback "${DEFAULT_MODEL}".` };
+    if (imageModels.length === 0) {
+      return { model: DEFAULT_MODEL, warning: `No known image-generation model matched /models; using fallback model "${DEFAULT_MODEL}".` };
+    }
     return { model: imageModels[0] };
   } catch (err) {
-    return { model: DEFAULT_MODEL, warning: `Could not reach /models (${String(err)}); using fallback "${DEFAULT_MODEL}".` };
+    return {
+      model: DEFAULT_MODEL,
+      warning: `Could not reach /models (${String(err)}); using fallback model "${DEFAULT_MODEL}".`,
+    };
   }
 }
 
-function asRecord(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+/**
+ * Call POST {baseUrl}/images/generations with an OpenAI-compatible payload and
+ * return an MCP tool result (markdown text + structuredContent).
+ */
+export interface ImageGenerationArgs {
+  prompt: string;
+  model?: string;
+  size?: string;
+  n?: number;
+  quality?: string;
+  style?: string;
+  extra?: Record<string, unknown>;
 }
 
-function buildImageGenerationBody(config, args, model) {
+export interface ImageGenerationResult {
+  model: string;
+  created?: number;
+  images: { index: number; url: string }[];
+  warning?: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/** Build a provider-specific image request while preserving the generic MCP args. */
+export function buildImageGenerationBody(
+  config: ServerConfig,
+  args: ImageGenerationArgs,
+  model: string,
+): Record<string, unknown> {
   const isAgnes = isAgnesApiBaseUrl(config.baseUrl);
-  const body = { model, prompt: args.prompt, n: args.n ?? 1 };
+  const body: Record<string, unknown> = {
+    model,
+    prompt: args.prompt,
+    n: args.n ?? 1,
+  };
 
   if (isAgnes) {
+    // Agnes requires size and nests image/output format inside extra_body.
     body.size = args.size && args.size !== "auto" ? args.size : AGNES_DEFAULT_IMAGE_SIZE;
     const extra = { ...(args.extra ?? {}) };
     const extraBody = { ...(asRecord(extra.extra_body) ?? {}) };
     delete extra.extra_body;
+
     if ("image" in extra) {
       if (!("image" in extraBody)) extraBody.image = extra.image;
       delete extra.image;
@@ -291,7 +556,12 @@ function buildImageGenerationBody(config, args, model) {
       if (!("response_format" in extraBody)) extraBody.response_format = extra.response_format;
       delete extra.response_format;
     }
-    if (!("response_format" in extraBody) && extra.return_base64 !== true) extraBody.response_format = "url";
+    // URL output is the default contract of this MCP. Explicit b64 settings are
+    // still honored and will be normalized to a Storage URL afterwards.
+    if (!("response_format" in extraBody) && extra.return_base64 !== true) {
+      extraBody.response_format = "url";
+    }
+
     Object.assign(body, extra);
     body.extra_body = extraBody;
     return body;
@@ -305,11 +575,14 @@ function buildImageGenerationBody(config, args, model) {
   return body;
 }
 
-// ---- core ----
-async function generateImages(config, args) {
+/** Execute image generation and always normalize image output to URLs. */
+export async function executeImageGeneration(
+  config: ServerConfig,
+  args: ImageGenerationArgs,
+): Promise<ImageGenerationResult> {
   const isAgnes = isAgnesApiBaseUrl(config.baseUrl);
   let model = args.model ?? config.defaultModel ?? (isAgnes ? AGNES_DEFAULT_IMAGE_MODEL : undefined);
-  let modelNote;
+  let modelNote: string | undefined;
   if (!model) {
     const picked = await pickModel(config.baseUrl, config.apiKey);
     model = picked.model;
@@ -319,155 +592,304 @@ async function generateImages(config, args) {
   const body = buildImageGenerationBody(config, args, model);
 
   const client = new OpenAI({ apiKey: config.apiKey, baseURL: normalizeProviderBaseUrl(config.baseUrl) });
-  let data;
+  let data: { created?: number; data?: GeneratedImage[] };
   try {
-    data = await client.images.generate(body);
+    data = await client.images.generate(body as unknown as ImageGenerateParamsNonStreaming);
   } catch (err) {
-    const status = err && typeof err === "object" && "status" in err ? err.status : undefined;
+    const status = err && typeof err === "object" && "status" in err
+      ? (err as { status?: unknown }).status
+      : undefined;
     const detail = err instanceof Error ? err.message : String(err);
     const label = typeof status === "number" ? `Image API error (HTTP ${status})` : "Image API error";
-    return { content: [{ type: "text", text: `${label}:\n${detail}` }], isError: true };
+    throw new Error(`${label}: ${detail}`);
   }
 
   const images = Array.isArray(data.data) ? data.data : [];
-  const markdownLines = [];
-  if (modelNote) markdownLines.push(`> ${modelNote}`);
-  markdownLines.push(`Generated ${images.length} image(s) with model **${model}**.`);
-  const structuredImages = [];
+  const normalized: { index: number; url: string }[] = [];
   for (let i = 0; i < images.length; i++) {
     const img = images[i] ?? {};
-    const entry = { index: i };
     if (typeof img.url === "string" && img.url) {
       const dataUrl = parseBase64ImageDataUrl(img.url);
       if (dataUrl) {
         try {
           const url = await uploadBase64ImageToSupabase(dataUrl.base64, model, args, dataUrl.contentType);
-          entry.url = url;
-          markdownLines.push(`Image ${i+1}: ${url}`);
+          normalized.push({ index: i, url });
+          continue;
         } catch (err) {
           const detail = err instanceof Error ? err.message : String(err);
-          return { content: [{ type: "text", text: `Image storage fallback failed: ${detail}` }], isError: true };
+          throw new Error(`Image storage fallback failed: ${detail}`);
         }
-      } else {
-        entry.url = img.url;
-        markdownLines.push(`Image ${i+1}: ${img.url}`);
       }
-    } else if (typeof img.b64_json === "string" && img.b64_json) {
+      normalized.push({ index: i, url: img.url });
+      continue;
+    }
+    if (typeof img.b64_json === "string" && img.b64_json) {
       try {
         const url = await uploadBase64ImageToSupabase(img.b64_json, model, args);
-        entry.url = url;
-        markdownLines.push(`Image ${i+1}: ${url}`);
+        normalized.push({ index: i, url });
+        continue;
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: "text", text: `Image storage fallback failed: ${detail}` }], isError: true };
+        throw new Error(`Image storage fallback failed: ${detail}`);
       }
-    } else {
-      return { content: [{ type: "text", text: `Image API returned neither a URL nor base64 image data for model **${model}**.` }], isError: true };
     }
-    structuredImages.push(entry);
+    throw new Error(`Image API returned neither a URL nor base64 image data for model ${model}.`);
   }
-  return { content: [{ type: "text", text: markdownLines.join("\n\n") }], structuredContent: { model, created: data.created, images: structuredImages } };
+
+  return { model, created: data.created, images: normalized, warning: modelNote };
 }
 
-// ---- MCP factory ----
-function buildServer(config) {
+async function generateImages(
+  config: ServerConfig,
+  args: ImageGenerationArgs,
+): Promise<{ content: { type: "text"; text: string }[]; structuredContent?: unknown; isError?: boolean }> {
+  try {
+    const result = await executeImageGeneration(config, args);
+    const lines: string[] = [];
+    if (result.warning) lines.push(`> ${result.warning}`);
+    lines.push(`Generated ${result.images.length} image(s) with model **${result.model}**.`);
+    for (const image of result.images) lines.push(`Image ${image.index + 1}: ${image.url}`);
+    return {
+      content: [{ type: "text", text: lines.join("\n\n") }],
+      structuredContent: { model: result.model, created: result.created, images: result.images },
+    };
+  } catch (err) {
+    return {
+      content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
+      isError: true,
+    };
+  }
+}
+
+interface BuildServerOptions {
+  asyncQueue?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// MCP server
+// ---------------------------------------------------------------------------
+
+/** Builds a fresh McpServer instance per request (serverless-friendly). */
+function buildServer(config: ServerConfig, options: BuildServerOptions = {}): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
-  server.registerTool("generate_image", {
-    description: "Generate images via OpenAI-compatible API. Config via headers X-Api-Key / X-Base-Url (multiple providers via X-Api-Key-N / X-Base-Url-N + X-Provider: N), query ?apiKey=&baseUrl=&provider=, or env OPENAI_API_KEY/OPENAI_BASE_URL.",
-    inputSchema: z.object({
-      prompt: z.string().describe("Detailed text description of the image(s) to generate."),
-      model: z.string().optional().describe("Optional model override. When omitted, defaultModel from the endpoint query string is used; Agnes endpoints default to agnes-image-2.1-flash; otherwise auto-select from GET /models."),
-      size: z.enum(["256x256","512x512","1024x1024","1024x1792","1792x1024","auto"]).optional(),
-      n: z.number().int().min(1).max(10).optional(),
-      quality: z.enum(["standard","hd"]).optional(),
-      style: z.enum(["vivid","natural"]).optional(),
-      extra: z.record(z.string(), z.unknown()).optional(),
-    }),
-  }, async (args) => {
-    if (!config.apiKey) return { content: [{ type: "text", text: "No API key. Pass X-Api-Key / Authorization: Bearer <key> / ?apiKey=..., or set OPENAI_API_KEY." }], isError: true };
-    return await generateImages(config, args);
-  });
+  server.registerTool(
+    "generate_image",
+    {
+      description: options.asyncQueue
+        ? "Queue an image-generation job and return a job_id immediately. Use get_image_job to poll until completed and retrieve image URLs."
+        : "Generate one or more images through an OpenAI-compatible image generation API. Returns plain-text image URLs plus structured URL metadata. Base64 image content is never exposed.",
+      inputSchema: z.object({
+        prompt: z.string().describe("Detailed text description of the image(s) to generate."),
+        model: z
+          .string()
+          .optional()
+          .describe("Optional model override. When omitted, defaultModel from the endpoint query string is used; Agnes endpoints default to agnes-image-2.1-flash; otherwise the server auto-selects from GET /models."),
+        size: z
+          .string()
+          .optional()
+          .describe("Provider-specific image size, e.g. 1024x1024 or 1024x768. 'auto' lets compatible providers decide."),
+        n: z.number().int().min(1).max(10).optional().describe("How many images to generate. Defaults to 1."),
+        quality: z.enum(["standard", "hd"]).optional().describe("Quality, e.g. for DALL·E 3."),
+        style: z.enum(["vivid", "natural"]).optional().describe("Style, e.g. for DALL·E 3."),
+        extra: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Any extra parameters to pass through to the provider, e.g. background or output_format."),
+      }),
+    },
+    async (args) => {
+      if (!config.apiKey) {
+        return {
+          content: [{
+            type: "text",
+            text: "No API key provided. Pass it via the `X-Api-Key` header, `Authorization: Bearer <key>`, or the `apiKey` query parameter. To use a registered indexed provider, also send `X-Provider: <N>`.",
+          }],
+          isError: true,
+        };
+      }
+      if (!options.asyncQueue) return await generateImages(config, args);
 
-  server.registerTool("list_models", {
-    description: "List all models from GET {baseUrl}/models. Optionally filter model names by a keyword string; whitespace- or comma-separated terms are matched case-insensitively and all terms must be present.",
-    inputSchema: z.object({
-      keywords: z.string().optional().describe("Optional keywords used to filter model ids, e.g. 'gpt 5' or 'qwen,coder'."),
-    }),
-  }, async (args) => {
-    if (!config.apiKey) return { content: [{ type: "text", text: "No API key. Pass X-Api-Key / Authorization: Bearer <key> / ?apiKey=..., or set OPENAI_API_KEY." }], isError: true };
-    const res = await fetch(`${config.baseUrl}/models`, { headers: { Authorization: `Bearer ${config.apiKey}` } });
-    if (!res.ok) return { content: [{ type: "text", text: `Models API error (HTTP ${res.status}): ${await res.text()}` }], isError: true };
-    const data = await res.json();
-    const allModels = (data.data ?? []).map(m => m.id).filter(id => typeof id === "string");
-    const terms = String(args.keywords ?? "").toLowerCase().split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
-    const models = terms.length ? allModels.filter(id => { const lower = id.toLowerCase(); return terms.every(term => lower.includes(term)); }) : allModels;
-    const suffix = terms.length ? ` matching "${args.keywords}"` : "";
-    return { content: [{ type: "text", text: models.length ? `Available models${suffix} (${models.length}):\n${models.join("\n")}` : `No models matched${suffix}.` }], structuredContent: { models } };
-  });
+      const admin = getSupabaseAdminConfig();
+      if (!admin) {
+        return {
+          content: [{ type: "text", text: "Supabase Queue mode is not configured on this deployment." }],
+          isError: true,
+        };
+      }
+
+      const jobId = crypto.randomUUID();
+      const requestSummary: Record<string, unknown> = {
+        ...(args.model ? { model: args.model } : {}),
+        ...(!args.model && config.defaultModel ? { default_model: config.defaultModel } : {}),
+        ...(args.size ? { size: args.size } : {}),
+        n: args.n ?? 1,
+        ...(args.quality ? { quality: args.quality } : {}),
+        ...(args.style ? { style: args.style } : {}),
+      };
+      try {
+        await enqueueImageJob(jobId, requestSummary, {
+          job_id: jobId,
+          api_key: config.apiKey,
+          base_url: config.baseUrl,
+          ...(config.defaultModel ? { default_model: config.defaultModel } : {}),
+          args,
+        });
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Failed to queue image generation: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+
+      const kick = await kickImageWorker();
+      const text = kick.ok
+        ? `Image generation queued.\njob_id: ${jobId}\nstatus: queued\nCall get_image_job with this job_id to retrieve the result.`
+        : `Image generation queued.\njob_id: ${jobId}\nstatus: queued\nworker kick warning: ${kick.detail ?? "unknown error"}\nCall get_image_job with this job_id to retry/kick processing and retrieve the result.`;
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: { job_id: jobId, status: "queued", worker_kicked: kick.ok },
+      };
+    },
+  );
+
+  if (options.asyncQueue) {
+    server.registerTool(
+      "get_image_job",
+      {
+        description: "Get the status and result URLs for a queued image generation job.",
+        inputSchema: z.object({
+          job_id: z.string().uuid().describe("Job id returned by generate_image."),
+        }),
+      },
+      async (args) => {
+        let job: ImageJobRow | null;
+        try {
+          job = await getImageJob(args.job_id);
+        } catch (err) {
+          return {
+            content: [{ type: "text", text: `Failed to read image job: ${err instanceof Error ? err.message : String(err)}` }],
+            isError: true,
+          };
+        }
+        if (!job) {
+          return { content: [{ type: "text", text: `Image job not found: ${args.job_id}` }], isError: true };
+        }
+        if (job.status === "queued" || job.status === "processing") {
+          await kickImageWorker();
+        }
+        const summary: Record<string, unknown> = {
+          job_id: job.id,
+          status: job.status,
+          attempts: job.attempts,
+          ...(job.result ? { result: job.result } : {}),
+          ...(job.error ? { error: job.error } : {}),
+        };
+        const lines = [`job_id: ${job.id}`, `status: ${job.status}`];
+        if (job.result?.images && Array.isArray(job.result.images)) {
+          for (const [index, image] of job.result.images.entries()) {
+            if (image && typeof image === "object" && "url" in image && typeof image.url === "string") {
+              lines.push(`Image ${index + 1}: ${image.url}`);
+            }
+          }
+        }
+        if (job.error) lines.push(`error: ${job.error}`);
+        return { content: [{ type: "text", text: lines.join("\n") }], structuredContent: summary };
+      },
+    );
+  }
+
+  server.registerTool(
+    "list_models",
+    {
+      description: "List all models from the configured OpenAI-compatible API (GET /models). Optionally filter model names by a keyword string; whitespace- or comma-separated terms are matched case-insensitively and all terms must be present.",
+      inputSchema: z.object({
+        keywords: z
+          .string()
+          .optional()
+          .describe("Optional keywords used to filter model ids, e.g. 'gpt 5' or 'qwen,coder'."),
+      }),
+    },
+    async (args) => {
+      if (!config.apiKey) {
+        return {
+          content: [{
+            type: "text",
+            text: "No API key provided. Pass it via the `X-Api-Key` header, `Authorization: Bearer <key>`, or the `apiKey` query parameter. To use a registered indexed provider, also send `X-Provider: <N>`.",
+          }],
+          isError: true,
+        };
+      }
+      const endpoint = `${config.baseUrl}/models`;
+      const res = await fetch(endpoint, {
+        headers: { Authorization: `Bearer ${config.apiKey}` },
+      });
+      if (!res.ok) {
+        return {
+          content: [{ type: "text", text: `Models API error (HTTP ${res.status}): ${await res.text()}` }],
+          isError: true,
+        };
+      }
+      const data = (await res.json()) as { data?: { id?: string }[] };
+      const allModels = (data.data ?? [])
+        .map((m) => m.id)
+        .filter((id): id is string => typeof id === "string");
+      const terms = (args.keywords ?? "")
+        .toLowerCase()
+        .split(/[\s,]+/)
+        .map((term) => term.trim())
+        .filter(Boolean);
+      const models = terms.length
+        ? allModels.filter((id) => {
+          const lower = id.toLowerCase();
+          return terms.every((term) => lower.includes(term));
+        })
+        : allModels;
+      const suffix = terms.length ? ` matching "${args.keywords}"` : "";
+      return {
+        content: [{
+          type: "text",
+          text: models.length
+            ? `Available models${suffix} (${models.length}):\n${models.join("\n")}`
+            : `No models matched${suffix}.`,
+        }],
+        structuredContent: { models },
+      };
+    },
+  );
+
 
   return server;
 }
 
-// ---- entry points ----
-async function startStdio() {
-  const config = { apiKey: process.env.OPENAI_API_KEY ?? process.env.X_OPENAI_API_KEY ?? "", baseUrl: (process.env.OPENAI_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, "") };
-  const server = buildServer(config);
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error(`[${SERVER_NAME}] STDIO mode — baseUrl=${config.baseUrl} ${config.apiKey ? "(key set)" : "(no key — set OPENAI_API_KEY)"}`);
+// The MCP HTTP handler. createMcpHandler serves the modern protocol revision and
+// automatically falls back to the stateless 2025-era streamable HTTP flow, so
+// current MCP clients (Claude Desktop, Cursor, Copilot, ...) work out of the box.
+// (Named export is only used by the local test; the Val Town HTTP trigger uses
+// the default export below.)
+// The MCP HTTP handler. createMcpHandler serves the modern protocol revision and
+// automatically falls back to the stateless 2025-era streamable HTTP flow, so
+// current MCP clients (Claude Desktop, Cursor, Copilot, ...) work out of the box.
+// The factory runs once per request and reads the API config from that request's
+// headers / query params, so no environment variables are needed.
+// (Named export is only used by the local tests; the Val Town HTTP trigger uses
+// the default export below.)
+export const mcpHandler = createMcpHandler((ctx) => {
+  const config = extractConfig(ctx.requestInfo ?? new Request("http://localhost/"));
+  return buildServer(config);
+});
+
+/** Supabase deployment variant: generate_image is queued and get_image_job is exposed. */
+export const supabaseMcpHandler = createMcpHandler((ctx) => {
+  const config = extractConfig(ctx.requestInfo ?? new Request("http://localhost/"));
+  return buildServer(config, { asyncQueue: true });
+});
+
+// ---------------------------------------------------------------------------
+// Val Town HTTP entry point
+// ---------------------------------------------------------------------------
+
+/** Val Town calls the default export directly with a web-standard Request. */
+export default function handler(req: Request): Response | Promise<Response> {
+  return mcpHandler.fetch(req);
 }
-
-function startHttp() {
-  const port = Number(process.env.PORT ?? 3000);
-  const host = process.env.HOST ?? "127.0.0.1";
-  const httpServer = createServer(async (req, res) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization, X-Api-Key, X-Base-Url, X-Provider, X-OpenAI-Api-Key, X-OpenAI-Base-Url, mcp-session-id, mcp-protocol-version");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
-    if (req.method === "OPTIONS") { res.writeHead(204).end(); return; }
-
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-    if (url.pathname === "/health" && req.method === "GET") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ name: SERVER_NAME, version: SERVER_VERSION, status: "ok" }));
-      return;
-    }
-    if (url.pathname === "/" && req.method === "GET") {
-      const accept = getHeader(req, "accept");
-      if (!accept.includes("text/event-stream") && !accept.includes("application/json")) {
-        res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-        res.end(SERVER_NAME + " v" + SERVER_VERSION + "\nMCP Streamable HTTP: POST http://" + host + ":" + port + "/mcp\nHealth: GET http://" + host + ":" + port + "/health\nPass API key via X-Api-Key / Authorization: Bearer <key> / ?apiKey= or OPENAI_API_KEY env. Multiple providers: X-Base-Url-N / X-Api-Key-N + X-Provider: N.\n");
-        return;
-      }
-    }
-    const isMcpPath = url.pathname === "/mcp" || url.pathname === "/" || url.pathname === "/sse";
-    if (!isMcpPath) { res.writeHead(404, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Not found. Use POST /mcp" })); return; }
-
-    try {
-      const config = extractConfig(req);
-      const server = buildServer(config);
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-      res.on("close", () => transport.close());
-      await server.connect(transport);
-      await transport.handleRequest(req, res);
-    } catch (err) {
-      console.error("[mcp] handleRequest error:", err);
-      if (!res.headersSent) { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(err) })); }
-    }
-  });
-  httpServer.listen(port, host, () => {
-    console.log(`[${SERVER_NAME} v${SERVER_VERSION}] HTTP listening on http://${host}:${port}/mcp`);
-    console.log(`  Health: http://${host}:${port}/health`);
-    console.log(`  Pass key per-request: X-Api-Key / Authorization: Bearer <key> / ?apiKey= (multiple providers: X-Base-Url-N / X-Api-Key-N + X-Provider: N)`);
-  });
-}
-
-const isMain = process.argv[1] ? fileURLToPath(import.meta.url) === process.argv[1] : false;
-if (isMain) {
-  if (process.argv.includes("--stdio")) await startStdio();
-  else startHttp();
-}
-
-export { buildServer, extractConfig, pickModel, SERVER_NAME, SERVER_VERSION };

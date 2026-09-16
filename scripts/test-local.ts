@@ -10,7 +10,7 @@
  * is expected.
  */
 
-import { mcpHandler } from "../mcp-image-server.ts";
+import { mcpHandler } from "../main.ts";
 
 function rpc(id: number, method: string, params?: unknown): string {
   return JSON.stringify({ jsonrpc: "2.0", id, method, ...(params ? { params } : {}) });

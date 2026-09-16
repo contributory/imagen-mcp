@@ -10,12 +10,12 @@ HTTP** transport (Claude Desktop, Cursor, Copilot, any MCP client).
 
 ### Stack & entry point
 
-- `mcp-image-server.ts` — the ONLY file that matters for deployment. Paste it
+- `main.ts` — the ONLY file that matters for deployment. Paste it
   into a Val Town HTTP val. The **default export is the HTTP handler**:
   `export default function handler(req: Request): Response | Promise<Response>`
   Val Town calls the default export directly — a `{ fetch }` object default
   export is NOT supported there (that pattern is only used by
-  `scripts/serve-local.ts` for local testing).
+  `scripts/serve.ts` for local testing).
 - `export const mcpHandler` — named export of `createMcpHandler(...)`, used
   only by local scripts/tests.
 - Imports: `npm:@modelcontextprotocol/server` (v2 SDK) and `npm:zod@4`. Inline
@@ -96,9 +96,8 @@ The standalone generation path does not remember model selection. On Supabase, P
 
 ### Local development (not Val Town)
 
-- `deno task serve` → `scripts/serve-local.ts` (wraps the default export with
-  `Deno.serve` on `127.0.0.1:8789`; Deno.serve logs a harmless legacy-abort
-  warning). The `{ fetch }`-style object export is used ONLY in this wrapper.
+- `deno task serve` → `scripts/serve.ts` (wraps the default export with
+  `Deno.serve` on `0.0.0.0:8000`; `deno task serve:local` uses port 8789).
 - `deno task test` → `scripts/test-local.ts` (standalone JSON-RPC smoke; asserts `generate_image` + `list_models`).
 - `deno task test:queue` → `scripts/test-queue.ts` (Supabase async MCP smoke; asserts `generate_image` + `get_image_job` + `list_models`, enqueue, worker kick, and polling).
 - `deno task test:mock` → `scripts/test-mock-api.ts` (E2E against a local mock

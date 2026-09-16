@@ -89,7 +89,7 @@ curl -X POST "https://<username>-<valname>.web.val.run/?apiKey=sk-...&baseUrl=ht
 
 ```
 imagen-mcp/
-├── mcp-image-server.ts      # Core MCP + synchronous generation runtime
+├── main.ts      # Core MCP + synchronous generation runtime
 ├── supabase-queue.ts        # Supabase Queue/job helpers
 ├── deno.json                # Tasks: serve / test / test:mock / test:queue / check
 ├── supabase/
@@ -98,7 +98,7 @@ imagen-mcp/
 │       ├── imagen-mcp/      # Async MCP endpoint
 │       └── imagen-mcp-worker/ # Background queue consumer
 └── scripts/
-    ├── serve-local.ts
+    ├── serve.ts
     ├── test-local.ts
     ├── test-mock-api.ts
     └── test-queue.ts
@@ -111,7 +111,7 @@ imagen-mcp/
 ### Method 1 — Web editor (simplest)
 
 1. Go to [val.town](https://val.town) → **New val** → name it (e.g., `imagen-mcp`).
-2. Paste the entire content of `mcp-image-server.ts` into the editor.
+2. Paste the entire content of `main.ts` into the editor.
 3. Click **`+ Add trigger`** → select **HTTP**.
 4. **Save** — the val is deployed immediately. Your endpoint:
    `https://<username>-<valname>.web.val.run`
@@ -122,7 +122,7 @@ imagen-mcp/
 
 ```bash
 npx valtown val create --http <username>/imagen-mcp
-# then paste the content of mcp-image-server.ts and deploy
+# then paste the content of main.ts and deploy
 ```
 
 ---
@@ -237,14 +237,14 @@ deno task test:mock
 
 # 3. Run HTTP server locally
 deno task serve
-# → MCP server at http://127.0.0.1:8789
+# → MCP server at http://127.0.0.1:8000 (PORT=8789 deno task serve:local)
 # Send X-Api-Key header when calling tools
 ```
 
 Or run directly:
 
 ```bash
-deno run --allow-net --allow-env --allow-import scripts/serve-local.ts
+deno run --allow-net --allow-env --allow-import scripts/serve.ts
 ```
 
 ---

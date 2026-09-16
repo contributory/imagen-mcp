@@ -1,10 +1,9 @@
-FROM node:22-alpine
+FROM denoland/deno:2.9.6
 
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev || npm install --omit=dev
-COPY main.js ./
+WORKDIR /app
+COPY deno.json supabase-queue.ts main.ts ./
+RUN deno cache main.ts supabase-queue.ts
 
-ENV PORT=3000
-ENV HOST=0.0.0.0
-EXPOSE 3000
-CMD ["node", "main.js"]
+ENV PORT=8000
+EXPOSE 8000
+CMD ["deno", "run", "--allow-net", "--allow-env", "--allow-import", "scripts/serve.ts"]

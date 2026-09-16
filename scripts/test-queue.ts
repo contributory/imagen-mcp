@@ -2,7 +2,7 @@
 Deno.env.set("SUPABASE_URL", "http://127.0.0.1:8791");
 Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "test-service-role");
 
-const { supabaseMcpHandler } = await import("../mcp-image-server.ts");
+const { supabaseMcpHandler } = await import("../main.ts");
 
 interface JobState {
   id: string;
