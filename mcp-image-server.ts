@@ -14,8 +14,19 @@
  * for Queue/Storage administration:
  *
  *   Headers:
- *     X-OpenAI-Api-Key: <api key>                  (required)
- *     X-OpenAI-Base-Url: https://api.openai.com/v1 (optional)
+ *     X-Api-Key: <api key>                        (required)
+ *     X-Base-Url: https://api.openai.com/v1       (optional)
+ *
+ *   Multiple upstream providers can be registered on a single request using
+ *   indexed headers (base URL + API key for each index N >= 1):
+ *       X-Base-Url-1 / X-Api-Key-1
+ *       X-Base-Url-2 / X-Api-Key-2
+ *       ...
+ *   Pick which registered provider a call should use with:
+ *       X-Provider: <N>      (or as a query param: ?provider=<N>)
+ *   When X-Provider is omitted or unknown, the primary X-Api-Key /
+ *   X-Base-Url config is used.
+ *   The legacy X-OpenAI-* header names remain accepted for backwards compat.
  *   Alternative for the key:  Authorization: Bearer <api key>
  *   Or as URL query params:   ?apiKey=...&baseUrl=...&defaultModel=...
  *
@@ -55,10 +66,17 @@ const AGNES_DEFAULT_IMAGE_SIZE = "1024x1024";
 // Per-request configuration (headers / query params)
 // ---------------------------------------------------------------------------
 
+export interface ProviderConfig {
+  baseUrl: string;
+  apiKey: string;
+}
+
 export interface ServerConfig {
   apiKey: string;
   baseUrl: string;
   defaultModel?: string;
+  /** Additional upstream providers keyed by numeric index (e.g. "1", "2"). */
+  providers?: Record<string, ProviderConfig>;
 }
 
 /** Detect Agnes by its documented API hosts, not by prompt/model content. */
@@ -101,23 +119,77 @@ function headerOrParam(
   return fallback;
 }
 
+/** Collect indexed upstream providers (base URL + API key) from headers. */
+function collectIndexedProviders(headers: Headers): Record<string, ProviderConfig> {
+  const providers: Record<string, ProviderConfig> = {};
+  const basePrefixes = ["x-base-url-", "x-openai-base-url-"];
+  const keyPrefixes = ["x-api-key-", "x-openai-api-key-"];
+  for (const [name, value] of headers) {
+    const lower = name.toLowerCase();
+    for (const prefix of basePrefixes) {
+      if (lower.startsWith(prefix)) {
+        const idx = lower.slice(prefix.length);
+        if (/^\d+$/.test(idx)) {
+          const pv = providers[idx] ?? { baseUrl: "", apiKey: "" };
+          pv.baseUrl = normalizeProviderBaseUrl(value.trim());
+          providers[idx] = pv;
+        }
+      }
+    }
+    for (const prefix of keyPrefixes) {
+      if (lower.startsWith(prefix)) {
+        const idx = lower.slice(prefix.length);
+        if (/^\d+$/.test(idx)) {
+          const pv = providers[idx] ?? { baseUrl: "", apiKey: "" };
+          pv.apiKey = value.trim();
+          providers[idx] = pv;
+        }
+      }
+    }
+  }
+  for (const key of Object.keys(providers)) {
+    if (!providers[key].baseUrl || !providers[key].apiKey) delete providers[key];
+  }
+  return providers;
+}
+
 /** Extract base URL / API key from the request headers or query params. */
 function extractConfig(req: Request): ServerConfig {
   const url = new URL(req.url);
   const headers = req.headers;
 
-  let apiKey = headerOrParam(headers, "x-openai-api-key", url.searchParams, "apiKey");
+  // Primary API key: X-Api-Key header, then legacy X-OpenAI-Api-Key, then a
+  // query param, then Authorization: Bearer.
+  let apiKey = headerOrParam(headers, "x-api-key", url.searchParams, "apiKey");
+  if (!apiKey) apiKey = headerOrParam(headers, "x-openai-api-key", url.searchParams, "apiKey");
   if (!apiKey) {
     const auth = headers.get("authorization") ?? "";
     if (auth.startsWith("Bearer ")) apiKey = auth.slice(7).trim();
   }
 
-  const baseUrl = headerOrParam(headers, "x-openai-base-url", url.searchParams, "baseUrl", DEFAULT_BASE_URL);
+  // Primary base URL: X-Base-Url header, then legacy X-OpenAI-Base-Url, then
+  // a query param.
+  let baseUrl = headerOrParam(headers, "x-base-url", url.searchParams, "baseUrl");
+  if (!baseUrl) baseUrl = headerOrParam(headers, "x-openai-base-url", url.searchParams, "baseUrl", DEFAULT_BASE_URL);
+
+  // Additional upstream providers registered via indexed headers.
+  const providers = collectIndexedProviders(headers);
+
+  // Provider selection: X-Provider header or ?provider= (index of a registered
+  // indexed provider). Falls back to the primary config when unspecified or
+  // unknown.
+  const selectedIndex = headerOrParam(headers, "x-provider", url.searchParams, "provider").trim();
+  if (providers[selectedIndex]) {
+    baseUrl = providers[selectedIndex].baseUrl;
+    apiKey = providers[selectedIndex].apiKey;
+  }
+
   const defaultModel = (url.searchParams.get("defaultModel") ?? "").trim();
 
   return {
     apiKey,
     baseUrl: normalizeProviderBaseUrl(baseUrl),
+    ...(Object.keys(providers).length ? { providers } : {}),
     ...(defaultModel ? { defaultModel } : {}),
   };
 }
@@ -631,7 +703,7 @@ function buildServer(config: ServerConfig, options: BuildServerOptions = {}): Mc
         return {
           content: [{
             type: "text",
-            text: "No API key provided. Pass it via the `X-OpenAI-Api-Key` header, `Authorization: Bearer <key>`, or the `apiKey` query parameter.",
+            text: "No API key provided. Pass it via the `X-Api-Key` header, `Authorization: Bearer <key>`, or the `apiKey` query parameter. To use a registered indexed provider, also send `X-Provider: <N>`.",
           }],
           isError: true,
         };
@@ -743,7 +815,7 @@ function buildServer(config: ServerConfig, options: BuildServerOptions = {}): Mc
         return {
           content: [{
             type: "text",
-            text: "No API key provided. Pass it via the `X-OpenAI-Api-Key` header, `Authorization: Bearer <key>`, or the `apiKey` query parameter.",
+            text: "No API key provided. Pass it via the `X-Api-Key` header, `Authorization: Bearer <key>`, or the `apiKey` query parameter. To use a registered indexed provider, also send `X-Provider: <N>`.",
           }],
           isError: true,
         };

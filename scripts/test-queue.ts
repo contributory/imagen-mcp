@@ -62,8 +62,8 @@ async function post(body: string): Promise<{ status: number; text: string }> {
     headers: {
       "Content-Type": "application/json",
       "Accept": "application/json, text/event-stream",
-      "X-OpenAI-Api-Key": "upstream-secret",
-      "X-OpenAI-Base-Url": "https://images.example.test/v1",
+      "X-Api-Key": "upstream-secret",
+      "X-Base-Url": "https://images.example.test/v1",
     },
     body,
   });

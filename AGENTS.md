@@ -35,11 +35,18 @@ is the Val Town-injected `valtown` secret, used purely to detect the platform).
 
 | Setting | Header | Query param |
 |---|---|---|
-| API key (required) | `X-OpenAI-Api-Key` or `Authorization: Bearer <key>` | `apiKey` |
-| Base URL (optional) | `X-OpenAI-Base-Url` | `baseUrl` |
+| API key (required) | `X-Api-Key` or `Authorization: Bearer <key>` (legacy: `X-OpenAI-Api-Key`) | `apiKey` |
+| Base URL (optional) | `X-Base-Url` (legacy: `X-OpenAI-Base-Url`) | `baseUrl` |
+| Extra provider (optional) | `X-Base-Url-N` + `X-Api-Key-N` | — |
+| Provider selection (optional) | `X-Provider: N` | `provider` |
 
-- `extractConfig(req)` → `ServerConfig { apiKey, baseUrl }` (trailing slashes
-  stripped from `baseUrl`).
+- `extractConfig(req)` → `ServerConfig { apiKey, baseUrl, providers? }`
+  (trailing slashes stripped from `baseUrl`). The old `X-OpenAI-*` header names
+  remain accepted for backwards compatibility.
+- Multiple upstream providers can be registered per request via indexed
+  headers, e.g. `X-Base-Url-1`/`X-Api-Key-1`, `X-Base-Url-2`/`X-Api-Key-2`, …
+  Pick one with `X-Provider: <N>` (or `?provider=<N>`). When it is omitted or
+  unknown, the primary `X-Api-Key`/`X-Base-Url` config is used.
 - `headerOrParam(headers, headerName, params, paramName, fallback)` reads a
   header first, then falls back to a URL query param.
 - Missing API key → `generate_image`/`list_models` return a helpful error

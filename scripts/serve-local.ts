@@ -9,7 +9,7 @@
  *   # then point your MCP client at http://127.0.0.1:8789
  *
  * No server env vars needed — pass the API key / base URL per request via
- * headers (X-OpenAI-Api-Key, X-OpenAI-Base-Url) or query params.
+ * headers (X-Api-Key, X-Base-Url, or multi-provider X-Base-Url-N/X-Api-Key-N + X-Provider) or query params.
  * Env: PORT (default 8789) for the local port only.
  */
 

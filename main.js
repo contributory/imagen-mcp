@@ -52,23 +52,65 @@ function normalizeProviderBaseUrl(baseUrl) {
   }
 }
 
+function collectIndexedProviders(req) {
+  const providers = {};
+  const basePrefixes = ["x-base-url-", "x-openai-base-url-"];
+  const keyPrefixes = ["x-api-key-", "x-openai-api-key-"];
+  for (const [name, value] of Object.entries(req.headers)) {
+    const lower = String(name).toLowerCase();
+    const v = Array.isArray(value) ? value[0] ?? "" : String(value ?? "");
+    for (const prefix of basePrefixes) {
+      if (lower.startsWith(prefix)) {
+        const idx = lower.slice(prefix.length);
+        if (/^\d+$/.test(idx)) {
+          const pv = providers[idx] ?? { baseUrl: "", apiKey: "" };
+          pv.baseUrl = normalizeProviderBaseUrl(v.trim());
+          providers[idx] = pv;
+        }
+      }
+    }
+    for (const prefix of keyPrefixes) {
+      if (lower.startsWith(prefix)) {
+        const idx = lower.slice(prefix.length);
+        if (/^\d+$/.test(idx)) {
+          const pv = providers[idx] ?? { baseUrl: "", apiKey: "" };
+          pv.apiKey = v.trim();
+          providers[idx] = pv;
+        }
+      }
+    }
+  }
+  for (const key of Object.keys(providers)) {
+    if (!providers[key].baseUrl || !providers[key].apiKey) delete providers[key];
+  }
+  return providers;
+}
+
 function extractConfig(req) {
   const host = getHeader(req, "host") || "localhost";
   const url = new URL(req.url ?? "/", `http://${host}`);
 
-  let apiKey = getHeader(req, "x-openai-api-key") || url.searchParams.get("apiKey") || "";
+  let apiKey = getHeader(req, "x-api-key") || getHeader(req, "x-openai-api-key") || url.searchParams.get("apiKey") || "";
   if (!apiKey) {
     const auth = getHeader(req, "authorization");
     if (auth.startsWith("Bearer ")) apiKey = auth.slice(7).trim();
   }
   if (!apiKey) apiKey = process.env.OPENAI_API_KEY ?? process.env.X_OPENAI_API_KEY ?? "";
 
-  let baseUrl = getHeader(req, "x-openai-base-url") || url.searchParams.get("baseUrl") || process.env.OPENAI_BASE_URL || DEFAULT_BASE_URL;
+  let baseUrl = getHeader(req, "x-base-url") || getHeader(req, "x-openai-base-url") || url.searchParams.get("baseUrl") || process.env.OPENAI_BASE_URL || DEFAULT_BASE_URL;
   const defaultModel = String(url.searchParams.get("defaultModel") || "").trim();
+
+  const providers = collectIndexedProviders(req);
+  const selectedIndex = getHeader(req, "x-provider") || url.searchParams.get("provider") || "";
+  if (selectedIndex && providers[selectedIndex]) {
+    baseUrl = providers[selectedIndex].baseUrl;
+    apiKey = providers[selectedIndex].apiKey;
+  }
 
   return {
     apiKey: String(apiKey).trim(),
     baseUrl: normalizeProviderBaseUrl(baseUrl),
+    ...(Object.keys(providers).length ? { providers } : {}),
     ...(defaultModel ? { defaultModel } : {}),
   };
 }
@@ -332,7 +374,7 @@ function buildServer(config) {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   server.registerTool("generate_image", {
-    description: "Generate images via OpenAI-compatible API. Config via headers X-OpenAI-Api-Key / X-OpenAI-Base-Url, query ?apiKey=&baseUrl=, or env OPENAI_API_KEY/OPENAI_BASE_URL.",
+    description: "Generate images via OpenAI-compatible API. Config via headers X-Api-Key / X-Base-Url (multiple providers via X-Api-Key-N / X-Base-Url-N + X-Provider: N), query ?apiKey=&baseUrl=&provider=, or env OPENAI_API_KEY/OPENAI_BASE_URL.",
     inputSchema: z.object({
       prompt: z.string().describe("Detailed text description of the image(s) to generate."),
       model: z.string().optional().describe("Optional model override. When omitted, defaultModel from the endpoint query string is used; Agnes endpoints default to agnes-image-2.1-flash; otherwise auto-select from GET /models."),
@@ -343,7 +385,7 @@ function buildServer(config) {
       extra: z.record(z.string(), z.unknown()).optional(),
     }),
   }, async (args) => {
-    if (!config.apiKey) return { content: [{ type: "text", text: "No API key. Pass X-OpenAI-Api-Key / Authorization: Bearer <key> / ?apiKey=..., or set OPENAI_API_KEY." }], isError: true };
+    if (!config.apiKey) return { content: [{ type: "text", text: "No API key. Pass X-Api-Key / Authorization: Bearer <key> / ?apiKey=..., or set OPENAI_API_KEY." }], isError: true };
     return await generateImages(config, args);
   });
 
@@ -353,7 +395,7 @@ function buildServer(config) {
       keywords: z.string().optional().describe("Optional keywords used to filter model ids, e.g. 'gpt 5' or 'qwen,coder'."),
     }),
   }, async (args) => {
-    if (!config.apiKey) return { content: [{ type: "text", text: "No API key. Pass X-OpenAI-Api-Key / Authorization: Bearer <key> / ?apiKey=..., or set OPENAI_API_KEY." }], isError: true };
+    if (!config.apiKey) return { content: [{ type: "text", text: "No API key. Pass X-Api-Key / Authorization: Bearer <key> / ?apiKey=..., or set OPENAI_API_KEY." }], isError: true };
     const res = await fetch(`${config.baseUrl}/models`, { headers: { Authorization: `Bearer ${config.apiKey}` } });
     if (!res.ok) return { content: [{ type: "text", text: `Models API error (HTTP ${res.status}): ${await res.text()}` }], isError: true };
     const data = await res.json();
@@ -381,7 +423,7 @@ function startHttp() {
   const host = process.env.HOST ?? "127.0.0.1";
   const httpServer = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization, X-OpenAI-Api-Key, X-OpenAI-Base-Url, mcp-session-id, mcp-protocol-version");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization, X-Api-Key, X-Base-Url, X-Provider, X-OpenAI-Api-Key, X-OpenAI-Base-Url, mcp-session-id, mcp-protocol-version");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
     if (req.method === "OPTIONS") { res.writeHead(204).end(); return; }
@@ -396,7 +438,7 @@ function startHttp() {
       const accept = getHeader(req, "accept");
       if (!accept.includes("text/event-stream") && !accept.includes("application/json")) {
         res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-        res.end(SERVER_NAME + " v" + SERVER_VERSION + "\nMCP Streamable HTTP: POST http://" + host + ":" + port + "/mcp\nHealth: GET http://" + host + ":" + port + "/health\nPass API key via X-OpenAI-Api-Key / Authorization: Bearer <key> / ?apiKey= or OPENAI_API_KEY env.\n");
+        res.end(SERVER_NAME + " v" + SERVER_VERSION + "\nMCP Streamable HTTP: POST http://" + host + ":" + port + "/mcp\nHealth: GET http://" + host + ":" + port + "/health\nPass API key via X-Api-Key / Authorization: Bearer <key> / ?apiKey= or OPENAI_API_KEY env. Multiple providers: X-Base-Url-N / X-Api-Key-N + X-Provider: N.\n");
         return;
       }
     }
@@ -418,7 +460,7 @@ function startHttp() {
   httpServer.listen(port, host, () => {
     console.log(`[${SERVER_NAME} v${SERVER_VERSION}] HTTP listening on http://${host}:${port}/mcp`);
     console.log(`  Health: http://${host}:${port}/health`);
-    console.log(`  Pass key per-request: X-OpenAI-Api-Key / Authorization: Bearer <key> / ?apiKey=`);
+    console.log(`  Pass key per-request: X-Api-Key / Authorization: Bearer <key> / ?apiKey= (multiple providers: X-Base-Url-N / X-Api-Key-N + X-Provider: N)`);
   });
 }
 

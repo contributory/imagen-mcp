@@ -14,13 +14,39 @@ Each request to the MCP server can carry its own configuration:
 
 | Information | Header | Query param | Required |
 |---|---|---|---|
-| API key | `X-OpenAI-Api-Key` | `apiKey` | ✅ |
-| Base URL | `X-OpenAI-Base-Url` | `baseUrl` | ❌ (defaults to `https://api.openai.com/v1`) |
+| API key | `X-Api-Key` (legacy: `X-OpenAI-Api-Key`) | `apiKey` | ✅ |
+| Base URL | `X-Base-Url` (legacy: `X-OpenAI-Base-Url`) | `baseUrl` | ❌ (defaults to `https://api.openai.com/v1`) |
+| Extra provider N | `X-Base-Url-N` + `X-Api-Key-N` | — | ❌ |
+| Provider selection | `X-Provider: N` | `provider` | ❌ |
 | Default model | — | `defaultModel` | ❌ |
 
 > 🤖 **Model does not need to be passed in every tool call** — precedence is `generate_image.model` → `defaultModel` query param → automatic selection from `GET {baseUrl}/models`. The Supabase queue temporarily stores the upstream credentials/prompt until processing finishes; `image_jobs` keeps only status, non-secret request metadata, and the URL result.
 
 API key can also be passed via the standard header: `Authorization: Bearer <apiKey>`.
+
+### Multiple providers on one request
+
+Register several upstream providers on the same endpoint using indexed headers
+(a base URL + API key per index `N`), then select which one a call should hit
+with `X-Provider: N` (or `?provider=N`):
+
+```bash
+curl -X POST https://<username>-<valname>.web.val.run/ \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'X-Base-Url-1: https://api.openai.com/v1' \
+  -H 'X-Api-Key-1: sk-openai-...' \
+  -H 'X-Base-Url-2: https://api.together.xyz/v1' \
+  -H 'X-Api-Key-2: sk-together-...' \
+  -H 'X-Provider: 2' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"a red panda astronaut"}}}'
+```
+
+The call above routes to provider **2** (Together). If `X-Provider` is omitted or
+does not match a registered index, the server falls back to the primary
+`X-Base-Url` / `X-Api-Key` (or `X-OpenAI-*`) config. The legacy `X-OpenAI-*`
+header names work for the primary config, and indexed prefixes
+`X-OpenAI-Base-Url-N` / `X-OpenAI-Api-Key-N` are also accepted.
 
 **Example with curl (via header):**
 
@@ -28,8 +54,8 @@ API key can also be passed via the standard header: `Authorization: Bearer <apiK
 curl -X POST https://<username>-<valname>.web.val.run/ \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
-  -H 'X-OpenAI-Api-Key: sk-...' \
-  -H 'X-OpenAI-Base-Url: https://api.openai.com/v1' \
+  -H 'X-Api-Key: sk-...' \
+  -H 'X-Base-Url: https://api.openai.com/v1' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
@@ -212,7 +238,7 @@ deno task test:mock
 # 3. Run HTTP server locally
 deno task serve
 # → MCP server at http://127.0.0.1:8789
-# Send X-OpenAI-Api-Key header when calling tools
+# Send X-Api-Key header when calling tools
 ```
 
 Or run directly:
@@ -242,7 +268,7 @@ Generated 1 image(s) with model **dall-e-3**.
 
 ## 🌐 Compatible providers (OpenAI-compatible)
 
-| Provider | `X-OpenAI-Base-Url` | Notes |
+| Provider | `X-Base-Url` (legacy: `X-OpenAI-Base-Url`) | Notes |
 |---|---|---|
 | OpenAI | `https://api.openai.com/v1` | DALL·E 3, gpt-image-1 |
 | Groq | `https://api.groq.com/openai/v1` | |

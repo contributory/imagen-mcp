@@ -7,7 +7,7 @@
  * Starts a tiny local mock API on port 8788, then verifies the server reads the
  * API config from request headers / query params (no env vars needed) and
  * auto-selects the model via GET /models:
- *   - generate_image via X-OpenAI-* headers (model auto-selected from /models)
+ *   - generate_image via X-Api-Key / X-Base-Url headers (model auto-selected from /models)
  *   - generate_image via URL query params
  *   - generate_image via Authorization: Bearer
  *   - list_models returns all models and supports keyword filtering
@@ -113,8 +113,8 @@ interface RpcResult {
 
 const BASE = "http://127.0.0.1:8788/mcp";
 const HEADERS = {
-  "X-OpenAI-Api-Key": "test-key-123",
-  "X-OpenAI-Base-Url": "http://127.0.0.1:8788/v1",
+  "X-Api-Key": "test-key-123",
+  "X-Base-Url": "http://127.0.0.1:8788/v1",
 };
 
 async function main() {
@@ -163,7 +163,7 @@ async function main() {
   const callAuth = await post(BASE, rpc(3, "tools/call", {
     name: "generate_image",
     arguments: { prompt: "a cute corgi astronaut" },
-  }), { "Authorization": "Bearer test-key-123", "X-OpenAI-Base-Url": "http://127.0.0.1:8788/v1" });
+  }), { "Authorization": "Bearer test-key-123", "X-Base-Url": "http://127.0.0.1:8788/v1" });
   console.log(`status: ${callAuth.status}`);
   const authImages = resultOf(callAuth.text) as RpcResult;
   const authStructured = authImages?.result?.structuredContent as { images?: { url?: string }[] } | undefined;
